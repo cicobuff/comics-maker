@@ -1,7 +1,8 @@
 import gi
 gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk, Gio
+from gi.repository import Gtk, Gio, Gdk
 from ..models.project import Project
+from ..models.element import Element, ElementType
 from ..core.undo_manager import UndoManager
 
 
@@ -19,6 +20,17 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         self.selected_elements = []
         self.zoom_level = 100
         self.grid_visible = False
+        
+        # Element manipulation state
+        self.dragging_element = None
+        self.resizing_element = None
+        self.resize_handle = None
+        self.drag_start_x = 0
+        self.drag_start_y = 0
+        self.element_start_x = 0
+        self.element_start_y = 0
+        self.element_start_width = 0
+        self.element_start_height = 0
         
         self.set_title(f"Comics Maker - {project.name}")
         self.set_default_size(1400, 900)
@@ -232,6 +244,23 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         scroll_controller.connect("scroll", self._on_canvas_scroll)
         self.canvas.add_controller(scroll_controller)
         
+        # Add drop target for drag and drop
+        drop_target = Gtk.DropTarget.new(type=str, actions=Gdk.DragAction.COPY)
+        drop_target.connect("drop", self._on_canvas_drop)
+        self.canvas.add_controller(drop_target)
+        
+        # Add gesture click for element selection
+        gesture_click = Gtk.GestureClick.new()
+        gesture_click.connect("pressed", self._on_canvas_click)
+        self.canvas.add_controller(gesture_click)
+        
+        # Add gesture drag for moving/resizing elements
+        gesture_drag = Gtk.GestureDrag.new()
+        gesture_drag.connect("drag-begin", self._on_drag_begin)
+        gesture_drag.connect("drag-update", self._on_drag_update)
+        gesture_drag.connect("drag-end", self._on_drag_end)
+        self.canvas.add_controller(gesture_drag)
+        
         scrolled.set_child(self.canvas)
         
         return scrolled
@@ -252,38 +281,64 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         elements_box.set_margin_start(5)
         elements_box.set_margin_end(5)
         
-        panel_btn = Gtk.Button(label="Comic Panel")
+        # Comic Panel button
+        panel_btn = self._create_draggable_button("Comic Panel", "panel")
         elements_box.append(panel_btn)
         
         shape_label = Gtk.Label(label="Shapes", xalign=0)
         shape_label.add_css_class("heading")
         elements_box.append(shape_label)
         
+        # Shape buttons
         for shape in ["Rectangle", "Circle", "Square", "Triangle", "Pentagon"]:
-            btn = Gtk.Button(label=shape)
+            btn = self._create_draggable_button(shape, f"shape:{shape.lower()}")
             elements_box.append(btn)
         
         text_label = Gtk.Label(label="Text", xalign=0)
         text_label.add_css_class("heading")
         elements_box.append(text_label)
         
-        textarea_btn = Gtk.Button(label="Text Area")
+        # Text Area button
+        textarea_btn = self._create_draggable_button("Text Area", "textarea")
         elements_box.append(textarea_btn)
         
         bubble_label = Gtk.Label(label="Speech Bubbles", xalign=0)
         bubble_label.add_css_class("heading")
         elements_box.append(bubble_label)
         
-        round_bubble_btn = Gtk.Button(label="Round Bubble")
+        # Speech bubble buttons
+        round_bubble_btn = self._create_draggable_button("Round Bubble", "speech_bubble:round")
         elements_box.append(round_bubble_btn)
         
-        thought_bubble_btn = Gtk.Button(label="Thought Bubble")
+        thought_bubble_btn = self._create_draggable_button("Thought Bubble", "speech_bubble:thought")
         elements_box.append(thought_bubble_btn)
         
         scrolled.set_child(elements_box)
         box.append(scrolled)
         
         return box
+    
+    def _create_draggable_button(self, label, element_type):
+        """Create a button that can be dragged to the canvas."""
+        from gi.repository import Gdk
+        
+        btn = Gtk.Button(label=label)
+        
+        # Make button a drag source
+        drag_source = Gtk.DragSource.new()
+        drag_source.set_actions(Gdk.DragAction.COPY)
+        drag_source.connect("prepare", self._on_drag_prepare, element_type)
+        btn.add_controller(drag_source)
+        
+        return btn
+    
+    def _on_drag_prepare(self, source, x, y, element_type):
+        """Prepare drag data."""
+        from gi.repository import Gdk
+        
+        # Create content provider with the element type
+        content = Gdk.ContentProvider.new_for_value(element_type)
+        return content
     
     def _draw_canvas(self, area, cr, width, height):
         """Draw the canvas."""
@@ -298,13 +353,149 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             x_offset = max((width - page_width) / 2, 0)
             y_offset = max((height - page_height) / 2, 0)
             
+            # Draw page background
             cr.set_source_rgb(1, 1, 1)
             cr.rectangle(x_offset, y_offset, page_width, page_height)
             cr.fill()
             
+            # Draw page border
             cr.set_source_rgb(0, 0, 0)
+            cr.set_line_width(1)
             cr.rectangle(x_offset, y_offset, page_width, page_height)
             cr.stroke()
+            
+            # Draw elements
+            for element in self.current_page.elements:
+                self._draw_element(cr, element, x_offset, y_offset, scale)
+    
+    def _draw_element(self, cr, element, page_x, page_y, scale):
+        """Draw a single element on the canvas."""
+        x = page_x + (element.x * scale)
+        y = page_y + (element.y * scale)
+        w = element.width * scale
+        h = element.height * scale
+        
+        # Draw based on element type
+        if element.type == ElementType.PANEL:
+            # Draw comic panel as a rectangle with border
+            border_color = element.properties.get("border_color", "#000000")
+            bg_color = element.properties.get("background_color", "#FFFFFF")
+            
+            # Fill with white background first
+            bg_r, bg_g, bg_b = self._hex_to_rgb(bg_color)
+            cr.set_source_rgb(bg_r, bg_g, bg_b)
+            cr.rectangle(x, y, w, h)
+            cr.fill()
+            
+            # Draw grey dithered dot pattern
+            cr.set_source_rgb(0.85, 0.85, 0.85)  # Light grey
+            dot_spacing = 8  # pixels between dots
+            dot_size = 2  # size of each dot
+            
+            # Draw dots in a grid pattern
+            start_x = int(x / dot_spacing) * dot_spacing
+            start_y = int(y / dot_spacing) * dot_spacing
+            
+            current_y = start_y
+            while current_y < y + h:
+                current_x = start_x
+                # Alternate rows for dithered effect
+                offset = dot_spacing / 2 if int((current_y - start_y) / dot_spacing) % 2 else 0
+                current_x += offset
+                
+                while current_x < x + w:
+                    # Only draw dot if it's within the panel bounds
+                    if current_x >= x and current_x <= x + w and current_y >= y and current_y <= y + h:
+                        cr.arc(current_x, current_y, dot_size / 2, 0, 2 * 3.14159)
+                        cr.fill()
+                    current_x += dot_spacing
+                current_y += dot_spacing
+            
+            # Draw border
+            border_r, border_g, border_b = self._hex_to_rgb(border_color)
+            cr.set_source_rgb(border_r, border_g, border_b)
+            cr.set_line_width(2)
+            cr.rectangle(x, y, w, h)
+            cr.stroke()
+        
+        elif element.type == ElementType.SHAPE:
+            # Draw shapes
+            shape_type = element.properties.get("shape_type", "rectangle")
+            line_color = element.properties.get("line_color", "#000000")
+            bg_color = element.properties.get("background_color", "#FFFFFF")
+            
+            bg_r, bg_g, bg_b = self._hex_to_rgb(bg_color)
+            line_r, line_g, line_b = self._hex_to_rgb(line_color)
+            
+            if shape_type == "rectangle" or shape_type == "square":
+                cr.set_source_rgb(bg_r, bg_g, bg_b)
+                cr.rectangle(x, y, w, h)
+                cr.fill()
+                cr.set_source_rgb(line_r, line_g, line_b)
+                cr.set_line_width(2)
+                cr.rectangle(x, y, w, h)
+                cr.stroke()
+            elif shape_type == "circle":
+                import math
+                radius = min(w, h) / 2
+                center_x = x + w / 2
+                center_y = y + h / 2
+                cr.set_source_rgb(bg_r, bg_g, bg_b)
+                cr.arc(center_x, center_y, radius, 0, 2 * math.pi)
+                cr.fill()
+                cr.set_source_rgb(line_r, line_g, line_b)
+                cr.set_line_width(2)
+                cr.arc(center_x, center_y, radius, 0, 2 * math.pi)
+                cr.stroke()
+        
+        elif element.type == ElementType.TEXTAREA:
+            # Draw text area
+            bg_r, bg_g, bg_b = self._hex_to_rgb(element.properties.get("background_color", "#FFFFFF"))
+            cr.set_source_rgb(bg_r, bg_g, bg_b)
+            cr.rectangle(x, y, w, h)
+            cr.fill()
+            
+            cr.set_source_rgb(0, 0, 0)
+            cr.set_line_width(1)
+            cr.rectangle(x, y, w, h)
+            cr.stroke()
+            
+            # Draw placeholder text
+            cr.set_source_rgb(0.5, 0.5, 0.5)
+            cr.move_to(x + 5, y + 15)
+            cr.show_text(element.properties.get("text", "Enter text here"))
+        
+        # Draw selection if selected
+        if element in self.selected_elements:
+            selection_color = self.config.get("selection_color", "#0066FF")
+            sel_r, sel_g, sel_b = self._hex_to_rgb(selection_color)
+            cr.set_source_rgb(sel_r, sel_g, sel_b)
+            cr.set_line_width(2)
+            cr.set_dash([5, 5])
+            cr.rectangle(x, y, w, h)
+            cr.stroke()
+            cr.set_dash([])
+            
+            # Draw resize handles
+            handle_size = 8
+            handles = [
+                (x - handle_size/2, y - handle_size/2),  # Top-left
+                (x + w - handle_size/2, y - handle_size/2),  # Top-right
+                (x - handle_size/2, y + h - handle_size/2),  # Bottom-left
+                (x + w - handle_size/2, y + h - handle_size/2),  # Bottom-right
+            ]
+            cr.set_source_rgb(sel_r, sel_g, sel_b)
+            for hx, hy in handles:
+                cr.rectangle(hx, hy, handle_size, handle_size)
+                cr.fill()
+    
+    def _hex_to_rgb(self, hex_color):
+        """Convert hex color to RGB tuple (0-1 range)."""
+        hex_color = hex_color.lstrip('#')
+        r = int(hex_color[0:2], 16) / 255.0
+        g = int(hex_color[2:4], 16) / 255.0
+        b = int(hex_color[4:6], 16) / 255.0
+        return (r, g, b)
     
     def _refresh_pages_list(self):
         """Refresh the pages list."""
@@ -467,6 +658,253 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 return True
         
         return False
+    
+    def _on_canvas_drop(self, drop_target, value, x, y):
+        """Handle drop event on canvas."""
+        if not self.current_page:
+            return False
+        
+        element_type = value
+        
+        # Calculate position relative to page
+        scale = self.zoom_level / 100.0
+        page_width = self.current_page.width * scale
+        page_height = self.current_page.height * scale
+        canvas_width = self.canvas.get_width()
+        canvas_height = self.canvas.get_height()
+        
+        x_offset = max((canvas_width - page_width) / 2, 0)
+        y_offset = max((canvas_height - page_height) / 2, 0)
+        
+        # Convert canvas coordinates to page coordinates
+        page_x = (x - x_offset) / scale
+        page_y = (y - y_offset) / scale
+        
+        # Check if drop is within page bounds
+        if page_x < 0 or page_x > self.current_page.width or page_y < 0 or page_y > self.current_page.height:
+            return False
+        
+        # Create element based on type
+        element = self._create_element_from_type(element_type, page_x, page_y)
+        if element:
+            self.current_page.add_element(element)
+            self.canvas.queue_draw()
+            return True
+        
+        return False
+    
+    def _create_element_from_type(self, element_type, x, y):
+        """Create an element from a type string."""
+        if element_type == "panel":
+            # Create comic panel (20% of page size)
+            width = self.current_page.width * 0.2
+            height = self.current_page.height * 0.2
+            return Element(
+                ElementType.PANEL,
+                x, y, width, height,
+                border_color=self.config.get("panel_border_color", "#000000"),
+                border_width=self.config.get("panel_border_width", 2),
+                background_color="#FFFFFF"
+            )
+        
+        elif element_type.startswith("shape:"):
+            shape_name = element_type.split(":")[1]
+            return Element(
+                ElementType.SHAPE,
+                x, y, 150, 150,
+                shape_type=shape_name,
+                line_color="#000000",
+                line_weight=2,
+                background_color="#FFFFFF"
+            )
+        
+        elif element_type == "textarea":
+            return Element(
+                ElementType.TEXTAREA,
+                x, y, 200, 100,
+                text="Enter text here",
+                font="Arial",
+                text_color="#000000",
+                background_color="#FFFFFF"
+            )
+        
+        elif element_type.startswith("speech_bubble:"):
+            bubble_type = element_type.split(":")[1]
+            return Element(
+                ElementType.SPEECH_BUBBLE,
+                x, y, 200, 100,
+                bubble_type=bubble_type,
+                text="Enter text here",
+                font="Arial",
+                text_color="#000000",
+                background_color="#FFFFFF"
+            )
+        
+        return None
+    
+    def _on_canvas_click(self, gesture, n_press, x, y):
+        """Handle click on canvas for element selection."""
+        if not self.current_page:
+            return
+        
+        # Calculate position relative to page
+        scale = self.zoom_level / 100.0
+        page_width = self.current_page.width * scale
+        page_height = self.current_page.height * scale
+        canvas_width = self.canvas.get_width()
+        canvas_height = self.canvas.get_height()
+        
+        x_offset = max((canvas_width - page_width) / 2, 0)
+        y_offset = max((canvas_height - page_height) / 2, 0)
+        
+        # Convert canvas coordinates to page coordinates
+        page_x = (x - x_offset) / scale
+        page_y = (y - y_offset) / scale
+        
+        # Find clicked element (top to bottom)
+        clicked_element = None
+        for element in reversed(self.current_page.elements):
+            if (element.x <= page_x <= element.x + element.width and
+                element.y <= page_y <= element.y + element.height):
+                clicked_element = element
+                break
+        
+        # Update selection
+        if clicked_element:
+            self.selected_elements = [clicked_element]
+        else:
+            self.selected_elements = []
+        
+        self.canvas.queue_draw()
+    
+    def _on_drag_begin(self, gesture, start_x, start_y):
+        """Handle drag begin for moving/resizing elements."""
+        if not self.current_page or not self.selected_elements:
+            return
+        
+        element = self.selected_elements[0]
+        
+        # Calculate position relative to page
+        scale = self.zoom_level / 100.0
+        page_width = self.current_page.width * scale
+        page_height = self.current_page.height * scale
+        canvas_width = self.canvas.get_width()
+        canvas_height = self.canvas.get_height()
+        
+        x_offset = max((canvas_width - page_width) / 2, 0)
+        y_offset = max((canvas_height - page_height) / 2, 0)
+        
+        # Convert canvas coordinates to page coordinates
+        page_x = (start_x - x_offset) / scale
+        page_y = (start_y - y_offset) / scale
+        
+        # Check if clicking on a resize handle
+        handle_size = 8 / scale
+        handles = {
+            'top-left': (element.x, element.y),
+            'top-right': (element.x + element.width, element.y),
+            'bottom-left': (element.x, element.y + element.height),
+            'bottom-right': (element.x + element.width, element.y + element.height),
+        }
+        
+        for handle_name, (hx, hy) in handles.items():
+            if (hx - handle_size <= page_x <= hx + handle_size and
+                hy - handle_size <= page_y <= hy + handle_size):
+                self.resizing_element = element
+                self.resize_handle = handle_name
+                self.drag_start_x = page_x
+                self.drag_start_y = page_y
+                self.element_start_x = element.x
+                self.element_start_y = element.y
+                self.element_start_width = element.width
+                self.element_start_height = element.height
+                return
+        
+        # If not on a handle, start dragging the element
+        if (element.x <= page_x <= element.x + element.width and
+            element.y <= page_y <= element.y + element.height):
+            self.dragging_element = element
+            self.drag_start_x = page_x
+            self.drag_start_y = page_y
+            self.element_start_x = element.x
+            self.element_start_y = element.y
+    
+    def _on_drag_update(self, gesture, offset_x, offset_y):
+        """Handle drag update for moving/resizing elements."""
+        scale = self.zoom_level / 100.0
+        
+        # Convert offset from canvas to page coordinates
+        dx = offset_x / scale
+        dy = offset_y / scale
+        
+        if self.dragging_element:
+            # Move the element
+            self.dragging_element.x = self.element_start_x + dx
+            self.dragging_element.y = self.element_start_y + dy
+            
+            # Constrain to page bounds
+            if self.dragging_element.x < 0:
+                self.dragging_element.x = 0
+            if self.dragging_element.y < 0:
+                self.dragging_element.y = 0
+            if self.dragging_element.x + self.dragging_element.width > self.current_page.width:
+                self.dragging_element.x = self.current_page.width - self.dragging_element.width
+            if self.dragging_element.y + self.dragging_element.height > self.current_page.height:
+                self.dragging_element.y = self.current_page.height - self.dragging_element.height
+            
+            self.canvas.queue_draw()
+        
+        elif self.resizing_element:
+            # Resize the element based on which handle is being dragged
+            element = self.resizing_element
+            
+            if self.resize_handle == 'top-left':
+                new_x = self.element_start_x + dx
+                new_y = self.element_start_y + dy
+                new_width = self.element_start_width - dx
+                new_height = self.element_start_height - dy
+                
+                if new_width > 20 and new_height > 20:
+                    element.x = new_x
+                    element.y = new_y
+                    element.width = new_width
+                    element.height = new_height
+            
+            elif self.resize_handle == 'top-right':
+                new_y = self.element_start_y + dy
+                new_width = self.element_start_width + dx
+                new_height = self.element_start_height - dy
+                
+                if new_width > 20 and new_height > 20:
+                    element.y = new_y
+                    element.width = new_width
+                    element.height = new_height
+            
+            elif self.resize_handle == 'bottom-left':
+                new_x = self.element_start_x + dx
+                new_width = self.element_start_width - dx
+                new_height = self.element_start_height + dy
+                
+                if new_width > 20 and new_height > 20:
+                    element.x = new_x
+                    element.width = new_width
+                    element.height = new_height
+            
+            elif self.resize_handle == 'bottom-right':
+                new_width = self.element_start_width + dx
+                new_height = self.element_start_height + dy
+                
+                if new_width > 20 and new_height > 20:
+                    element.width = new_width
+                    element.height = new_height
+            
+            self.canvas.queue_draw()
+    
+    def _on_drag_end(self, gesture, offset_x, offset_y):
+        """Handle drag end."""
+        self.dragging_element = None
+        self.resizing_element = None
+        self.resize_handle = None
     
     def _on_close_request(self, window):
         """Handle window close request."""
