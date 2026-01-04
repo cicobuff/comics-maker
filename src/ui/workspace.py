@@ -1081,95 +1081,97 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                             cr.arc(px, py, handle_size / 2, 0, 2 * math.pi)
                             cr.fill()
             
-            elif bubble_type == "round":
-                # Calculate tail connection points on bubble edge
-                # Find angle from bubble center to tail tip
-                bubble_center_x = x + w / 2
-                bubble_center_y = y + h / 2
-                angle = math.atan2(tail_tip_y_scaled - bubble_center_y, tail_tip_x_scaled - bubble_center_x)
-                
-                # Calculate base points perpendicular to tail direction
-                perp_angle = angle + math.pi / 2
-                base_offset_x = math.cos(perp_angle) * tail_base_width_scaled / 2
-                base_offset_y = math.sin(perp_angle) * tail_base_width_scaled / 2
-                
-                # Find where tail intersects bubble edge (approximate)
-                bubble_rx = w / 2
-                bubble_ry = h / 2
-                edge_dist = math.sqrt((bubble_rx * math.cos(angle))**2 + (bubble_ry * math.sin(angle))**2)
-                edge_x = bubble_center_x + edge_dist * math.cos(angle)
-                edge_y = bubble_center_y + edge_dist * math.sin(angle)
-                
-                # Draw tail triangle
-                cr.set_source_rgb(1, 1, 1)  # White fill
-                cr.move_to(edge_x + base_offset_x, edge_y + base_offset_y)
-                cr.line_to(edge_x - base_offset_x, edge_y - base_offset_y)
-                cr.line_to(tail_tip_x_scaled, tail_tip_y_scaled)
-                cr.close_path()
-                cr.fill_preserve()
-                cr.set_source_rgb(0, 0, 0)  # Black stroke
-                cr.set_line_width(2)
-                cr.stroke()
-            
-            elif bubble_type == "thought":
-                # Draw thought bubble tail as decreasing circles
-                bubble_center_x = x + w / 2
-                bubble_center_y = y + h / 2
-                
-                # Calculate positions for 3 circles from bubble to tip
-                num_circles = 3
-                for i in range(num_circles):
-                    t = (i + 1) / (num_circles + 1)
-                    circle_x = bubble_center_x + t * (tail_tip_x_scaled - bubble_center_x)
-                    circle_y = bubble_center_y + t * (tail_tip_y_scaled - bubble_center_y)
-                    radius = (15 - i * 4) * scale  # Decreasing radius
+            else:
+                # Old-style bubble rendering (for bubbles without control_points)
+                if bubble_type == "round":
+                    # Calculate tail connection points on bubble edge
+                    # Find angle from bubble center to tail tip
+                    bubble_center_x = x + w / 2
+                    bubble_center_y = y + h / 2
+                    angle = math.atan2(tail_tip_y_scaled - bubble_center_y, tail_tip_x_scaled - bubble_center_x)
                     
-                    cr.set_source_rgb(1, 1, 1)
-                    cr.arc(circle_x, circle_y, radius, 0, 2 * math.pi)
+                    # Calculate base points perpendicular to tail direction
+                    perp_angle = angle + math.pi / 2
+                    base_offset_x = math.cos(perp_angle) * tail_base_width_scaled / 2
+                    base_offset_y = math.sin(perp_angle) * tail_base_width_scaled / 2
+                    
+                    # Find where tail intersects bubble edge (approximate)
+                    bubble_rx = w / 2
+                    bubble_ry = h / 2
+                    edge_dist = math.sqrt((bubble_rx * math.cos(angle))**2 + (bubble_ry * math.sin(angle))**2)
+                    edge_x = bubble_center_x + edge_dist * math.cos(angle)
+                    edge_y = bubble_center_y + edge_dist * math.sin(angle)
+                    
+                    # Draw tail triangle
+                    cr.set_source_rgb(1, 1, 1)  # White fill
+                    cr.move_to(edge_x + base_offset_x, edge_y + base_offset_y)
+                    cr.line_to(edge_x - base_offset_x, edge_y - base_offset_y)
+                    cr.line_to(tail_tip_x_scaled, tail_tip_y_scaled)
+                    cr.close_path()
                     cr.fill_preserve()
-                    cr.set_source_rgb(0, 0, 0)
+                    cr.set_source_rgb(0, 0, 0)  # Black stroke
                     cr.set_line_width(2)
                     cr.stroke()
-            
-            # Draw bubble body (ellipse)
-            cr.set_source_rgb(1, 1, 1)  # White fill
-            cr.save()
-            cr.translate(x + w/2, y + h/2)
-            cr.scale(w/2, h/2)
-            cr.arc(0, 0, 1, 0, 2 * math.pi)
-            cr.restore()
-            cr.fill()
-            
-            # Draw bubble outline
-            cr.set_source_rgb(0, 0, 0)  # Black stroke
-            cr.set_line_width(3)
-            cr.save()
-            cr.translate(x + w/2, y + h/2)
-            cr.scale(w/2, h/2)
-            cr.arc(0, 0, 1, 0, 2 * math.pi)
-            cr.restore()
-            cr.stroke()
-            
-            # Draw text in text area
-            text_r, text_g, text_b = self._hex_to_rgb(text_color)
-            cr.set_source_rgb(text_r, text_g, text_b)
-            
-            # Get text area properties
-            text_area_x = element.properties.get("text_area_x", 20) * (w / element.width)
-            text_area_y = element.properties.get("text_area_y", 20) * (h / element.height)
-            font_size = element.properties.get("font_size", 12)
-            
-            cr.select_font_face(element.properties.get("font", "Arial"))
-            cr.set_font_size(font_size)
-            cr.move_to(x + text_area_x, y + text_area_y + font_size)
-            cr.show_text(text)
-            
-            # Draw tail tip handle if selected
-            if element in self.selected_elements:
-                handle_size = 8
-                cr.set_source_rgb(0.0, 0.8, 0.0)  # Green for tail tip handle
-                cr.arc(tail_tip_x_scaled, tail_tip_y_scaled, handle_size / 2, 0, 2 * math.pi)
+                
+                elif bubble_type == "thought":
+                    # Draw thought bubble tail as decreasing circles
+                    bubble_center_x = x + w / 2
+                    bubble_center_y = y + h / 2
+                    
+                    # Calculate positions for 3 circles from bubble to tip
+                    num_circles = 3
+                    for i in range(num_circles):
+                        t = (i + 1) / (num_circles + 1)
+                        circle_x = bubble_center_x + t * (tail_tip_x_scaled - bubble_center_x)
+                        circle_y = bubble_center_y + t * (tail_tip_y_scaled - bubble_center_y)
+                        radius = (15 - i * 4) * scale  # Decreasing radius
+                        
+                        cr.set_source_rgb(1, 1, 1)
+                        cr.arc(circle_x, circle_y, radius, 0, 2 * math.pi)
+                        cr.fill_preserve()
+                        cr.set_source_rgb(0, 0, 0)
+                        cr.set_line_width(2)
+                        cr.stroke()
+                
+                # Draw bubble body (ellipse)
+                cr.set_source_rgb(1, 1, 1)  # White fill
+                cr.save()
+                cr.translate(x + w/2, y + h/2)
+                cr.scale(w/2, h/2)
+                cr.arc(0, 0, 1, 0, 2 * math.pi)
+                cr.restore()
                 cr.fill()
+                
+                # Draw bubble outline
+                cr.set_source_rgb(0, 0, 0)  # Black stroke
+                cr.set_line_width(3)
+                cr.save()
+                cr.translate(x + w/2, y + h/2)
+                cr.scale(w/2, h/2)
+                cr.arc(0, 0, 1, 0, 2 * math.pi)
+                cr.restore()
+                cr.stroke()
+                
+                # Draw text in text area
+                text_r, text_g, text_b = self._hex_to_rgb(text_color)
+                cr.set_source_rgb(text_r, text_g, text_b)
+                
+                # Get text area properties
+                text_area_x = element.properties.get("text_area_x", 20) * (w / element.width)
+                text_area_y = element.properties.get("text_area_y", 20) * (h / element.height)
+                font_size = element.properties.get("font_size", 12)
+                
+                cr.select_font_face(element.properties.get("font", "Arial"))
+                cr.set_font_size(font_size)
+                cr.move_to(x + text_area_x, y + text_area_y + font_size)
+                cr.show_text(text)
+                
+                # Draw tail tip handle if selected
+                if element in self.selected_elements:
+                    handle_size = 8
+                    cr.set_source_rgb(0.0, 0.8, 0.0)  # Green for tail tip handle
+                    cr.arc(tail_tip_x_scaled, tail_tip_y_scaled, handle_size / 2, 0, 2 * math.pi)
+                    cr.fill()
     
     def _catmull_rom_to_bezier(self, p0, p1, p2, p3):
         """Convert Catmull-Rom curve segment to cubic Bézier control points."""
