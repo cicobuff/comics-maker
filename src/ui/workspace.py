@@ -1163,12 +1163,15 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         
         # Find clicked element (top to bottom)
         clicked_element = None
+        handle_margin = 8 / scale  # Add margin for resize handles
+        
         for element in reversed(self.current_page.elements):
             # Check panel bounds
             in_panel = (element.x <= page_x <= element.x + element.width and
                        element.y <= page_y <= element.y + element.height)
             
             # If element is selected in image mode, also check image bounds (which may extend outside panel)
+            # Include margin for resize handles
             in_image = False
             if (element in self.selected_elements and 
                 self.selection_mode == 'image' and
@@ -1183,8 +1186,9 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 img_x = element.x + offset_x
                 img_y = element.y + offset_y
                 
-                in_image = (img_x <= page_x <= img_x + image_width and
-                           img_y <= page_y <= img_y + image_height)
+                # Expand bounds to include handle margin
+                in_image = (img_x - handle_margin <= page_x <= img_x + image_width + handle_margin and
+                           img_y - handle_margin <= page_y <= img_y + image_height + handle_margin)
             
             if in_panel or in_image:
                 clicked_element = element
