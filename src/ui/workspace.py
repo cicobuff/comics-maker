@@ -32,6 +32,9 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         # Element manipulation state
         self.dragging_element = None
         self.dragging_image = False  # True if dragging the image inside a panel
+        self.dragging_tail = False  # True if dragging speech bubble tail tip
+        self.tail_start_x = 0
+        self.tail_start_y = 0
         self.resizing_element = None
         self.resizing_image = False  # True if resizing the image inside a panel
         self.resize_handle = None
@@ -554,7 +557,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         
         else:
             # Draw other element types (shapes, text, etc.)
-            self._draw_other_elements(cr, element, x, y, w, h)
+            self._draw_other_elements(cr, element, x, y, w, h, scale)
         
         # Draw selection if selected
         if element in self.selected_elements:
@@ -716,7 +719,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 current_x += dot_spacing
             current_y += dot_spacing
     
-    def _draw_other_elements(self, cr, element, x, y, w, h):
+    def _draw_other_elements(self, cr, element, x, y, w, h, scale):
         """Draw non-panel elements (shapes, text, etc)."""
         if element.type == ElementType.SHAPE:
             # Draw shapes
@@ -764,6 +767,118 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             cr.set_source_rgb(0.5, 0.5, 0.5)
             cr.move_to(x + 5, y + 15)
             cr.show_text(element.properties.get("text", "Enter text here"))
+        
+        elif element.type == ElementType.SPEECH_BUBBLE:
+            # Draw speech bubble with dynamic tail
+            import math
+            
+            # Start with a clean path state
+            cr.new_path()
+            
+            bubble_type = element.properties.get("bubble_type", "round")
+            text = element.properties.get("text", "Enter text here")
+            text_color = element.properties.get("text_color", "#000000")
+            
+            # Get tail properties
+            tail_tip_x = element.properties.get("tail_tip_x", w / 2)
+            tail_tip_y = element.properties.get("tail_tip_y", h + 50)
+            tail_base_width = element.properties.get("tail_base_width", 30)
+            
+            # Scale tail coordinates
+            tail_tip_x_scaled = x + (tail_tip_x * w / element.width)
+            tail_tip_y_scaled = y + (tail_tip_y * h / element.height)
+            tail_base_width_scaled = tail_base_width * scale
+            
+            # Draw tail first (behind bubble body)
+            if bubble_type == "round":
+                # Calculate tail connection points on bubble edge
+                # Find angle from bubble center to tail tip
+                bubble_center_x = x + w / 2
+                bubble_center_y = y + h / 2
+                angle = math.atan2(tail_tip_y_scaled - bubble_center_y, tail_tip_x_scaled - bubble_center_x)
+                
+                # Calculate base points perpendicular to tail direction
+                perp_angle = angle + math.pi / 2
+                base_offset_x = math.cos(perp_angle) * tail_base_width_scaled / 2
+                base_offset_y = math.sin(perp_angle) * tail_base_width_scaled / 2
+                
+                # Find where tail intersects bubble edge (approximate)
+                bubble_rx = w / 2
+                bubble_ry = h / 2
+                edge_dist = math.sqrt((bubble_rx * math.cos(angle))**2 + (bubble_ry * math.sin(angle))**2)
+                edge_x = bubble_center_x + edge_dist * math.cos(angle)
+                edge_y = bubble_center_y + edge_dist * math.sin(angle)
+                
+                # Draw tail triangle
+                cr.set_source_rgb(1, 1, 1)  # White fill
+                cr.move_to(edge_x + base_offset_x, edge_y + base_offset_y)
+                cr.line_to(edge_x - base_offset_x, edge_y - base_offset_y)
+                cr.line_to(tail_tip_x_scaled, tail_tip_y_scaled)
+                cr.close_path()
+                cr.fill_preserve()
+                cr.set_source_rgb(0, 0, 0)  # Black stroke
+                cr.set_line_width(2)
+                cr.stroke()
+            
+            elif bubble_type == "thought":
+                # Draw thought bubble tail as decreasing circles
+                bubble_center_x = x + w / 2
+                bubble_center_y = y + h / 2
+                
+                # Calculate positions for 3 circles from bubble to tip
+                num_circles = 3
+                for i in range(num_circles):
+                    t = (i + 1) / (num_circles + 1)
+                    circle_x = bubble_center_x + t * (tail_tip_x_scaled - bubble_center_x)
+                    circle_y = bubble_center_y + t * (tail_tip_y_scaled - bubble_center_y)
+                    radius = (15 - i * 4) * scale  # Decreasing radius
+                    
+                    cr.set_source_rgb(1, 1, 1)
+                    cr.arc(circle_x, circle_y, radius, 0, 2 * math.pi)
+                    cr.fill_preserve()
+                    cr.set_source_rgb(0, 0, 0)
+                    cr.set_line_width(2)
+                    cr.stroke()
+            
+            # Draw bubble body (ellipse)
+            cr.set_source_rgb(1, 1, 1)  # White fill
+            cr.save()
+            cr.translate(x + w/2, y + h/2)
+            cr.scale(w/2, h/2)
+            cr.arc(0, 0, 1, 0, 2 * math.pi)
+            cr.restore()
+            cr.fill()
+            
+            # Draw bubble outline
+            cr.set_source_rgb(0, 0, 0)  # Black stroke
+            cr.set_line_width(3)
+            cr.save()
+            cr.translate(x + w/2, y + h/2)
+            cr.scale(w/2, h/2)
+            cr.arc(0, 0, 1, 0, 2 * math.pi)
+            cr.restore()
+            cr.stroke()
+            
+            # Draw text in text area
+            text_r, text_g, text_b = self._hex_to_rgb(text_color)
+            cr.set_source_rgb(text_r, text_g, text_b)
+            
+            # Get text area properties
+            text_area_x = element.properties.get("text_area_x", 20) * (w / element.width)
+            text_area_y = element.properties.get("text_area_y", 20) * (h / element.height)
+            font_size = element.properties.get("font_size", 12)
+            
+            cr.select_font_face(element.properties.get("font", "Arial"))
+            cr.set_font_size(font_size)
+            cr.move_to(x + text_area_x, y + text_area_y + font_size)
+            cr.show_text(text)
+            
+            # Draw tail tip handle if selected
+            if element in self.selected_elements:
+                handle_size = 8
+                cr.set_source_rgb(0.0, 0.8, 0.0)  # Green for tail tip handle
+                cr.arc(tail_tip_x_scaled, tail_tip_y_scaled, handle_size / 2, 0, 2 * math.pi)
+                cr.fill()
     
     def _hex_to_rgb(self, hex_color):
         """Convert hex color to RGB tuple (0-1 range)."""
@@ -1011,7 +1126,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         return True
     
     def _on_key_pressed(self, controller, keyval, keycode, state):
-        """Handle key press events for Ctrl+/Ctrl- shortcuts."""
+        """Handle key press events for Ctrl+/Ctrl- shortcuts and Delete."""
         from gi.repository import Gdk
         
         # Check if Ctrl is pressed
@@ -1025,6 +1140,16 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             # Ctrl - or Ctrl Minus for zoom out
             elif keyval in (Gdk.KEY_minus, Gdk.KEY_KP_Subtract):
                 self._on_zoom_out(None, None)
+                return True
+        
+        # Delete key to remove selected elements
+        if keyval in (Gdk.KEY_Delete, Gdk.KEY_KP_Delete, Gdk.KEY_BackSpace):
+            if self.selected_elements and self.current_page:
+                for element in self.selected_elements:
+                    self.current_page.elements.remove(element)
+                self.selected_elements = []
+                self._update_layer_buttons()
+                self.canvas.queue_draw()
                 return True
         
         return False
@@ -1252,15 +1377,57 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         
         elif element_type.startswith("speech_bubble:"):
             bubble_type = element_type.split(":")[1]
-            return Element(
-                ElementType.SPEECH_BUBBLE,
-                x, y, 200, 100,
-                bubble_type=bubble_type,
-                text="Enter text here",
-                font="Arial",
-                text_color="#000000",
-                background_color="#FFFFFF"
-            )
+            
+            # Load bubble configuration from assets
+            import json
+            from pathlib import Path
+            
+            bubble_dir = Path(__file__).parent.parent.parent / "assets" / "speech_bubbles" / bubble_type
+            info_file = bubble_dir / "info.json"
+            
+            if info_file.exists():
+                with open(info_file, 'r') as f:
+                    info = json.load(f)
+                
+                text_area = info.get("text_area", {})
+                
+                width = info.get("default_width", 200)
+                height = info.get("default_height", 150)
+                
+                return Element(
+                    ElementType.SPEECH_BUBBLE,
+                    x, y, width, height,
+                    bubble_type=bubble_type,
+                    text=info.get("default_text", "Enter text here"),
+                    font=text_area.get("font", "Arial"),
+                    font_size=text_area.get("font_size", 12),
+                    text_color=text_area.get("text_color", "#000000"),
+                    text_align=text_area.get("text_align", "center"),
+                    vertical_align=text_area.get("vertical_align", "middle"),
+                    text_area_x=text_area.get("x", 20),
+                    text_area_y=text_area.get("y", 20),
+                    text_area_width=text_area.get("width", 160),
+                    text_area_height=text_area.get("height", 110),
+                    text_area_padding=text_area.get("padding", 10),
+                    # Tail properties - default to pointing down-left from bottom of bubble
+                    tail_tip_x=width / 2 - 30,  # Relative to bubble origin
+                    tail_tip_y=height + 50,
+                    tail_base_width=30
+                )
+            else:
+                # Fallback to simple bubble if assets not found
+                return Element(
+                    ElementType.SPEECH_BUBBLE,
+                    x, y, 200, 150,
+                    bubble_type=bubble_type,
+                    text="Enter text here",
+                    font="Arial",
+                    font_size=12,
+                    text_color="#000000",
+                    tail_tip_x=70,
+                    tail_tip_y=200,
+                    tail_base_width=30
+                )
         
         return None
     
@@ -1390,6 +1557,25 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         page_x = (start_x - x_offset) / scale
         page_y = (start_y - y_offset) / scale
         
+        # Check if clicking on speech bubble tail tip handle
+        if element.type == ElementType.SPEECH_BUBBLE:
+            tail_tip_x = element.properties.get("tail_tip_x", element.width / 2)
+            tail_tip_y = element.properties.get("tail_tip_y", element.height + 50)
+            
+            # Check if click is on tail tip handle
+            handle_size = 8 / scale
+            if (abs(page_x - (element.x + tail_tip_x)) < handle_size and
+                abs(page_y - (element.y + tail_tip_y)) < handle_size):
+                # Start dragging tail tip
+                self.dragging_element = element
+                self.dragging_tail = True
+                self.drag_start_x = page_x
+                self.drag_start_y = page_y
+                # Store initial tail tip position
+                self.tail_start_x = tail_tip_x
+                self.tail_start_y = tail_tip_y
+                return
+        
         # Handle based on selection mode
         if self.selection_mode == 'image' and element.type == ElementType.PANEL and element.properties.get("image"):
             # Image selection mode - work with image bounds
@@ -1505,7 +1691,17 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         dy = offset_y / scale
         
         if self.dragging_element:
-            if self.dragging_image:
+            if self.dragging_tail:
+                # Moving the speech bubble tail tip
+                element = self.dragging_element
+                # Update tail tip position based on drag from start position
+                element.properties["tail_tip_x"] = self.tail_start_x + dx
+                element.properties["tail_tip_y"] = self.tail_start_y + dy
+                
+                self.canvas.queue_draw()
+                return
+                
+            elif self.dragging_image:
                 # Moving the image inside the panel
                 element = self.dragging_element
                 new_offset_x = self.image_start_offset_x + dx
@@ -1630,6 +1826,9 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         
         self.dragging_element = None
         self.dragging_image = False
+        self.dragging_tail = False
+        self.tail_start_x = 0
+        self.tail_start_y = 0
         self.resizing_element = None
         self.resizing_image = False
         self.resize_handle = None
