@@ -49,6 +49,13 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         self.image_start_offset_x = 0  # For dragging images
         self.image_start_offset_y = 0
         
+        # Custom panel edit mode state
+        self.edit_mode_element = None  # Element currently in edit mode
+        self.selected_vertex = None  # Index of selected vertex for deletion
+        self.dragging_vertex = None  # Index of vertex being dragged
+        self.vertex_start_x = 0
+        self.vertex_start_y = 0
+        
         # Image cache to avoid reloading images on every frame
         self.image_cache = {}  # key: (filename, width, height), value: cairo surface
         
@@ -159,6 +166,8 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             "page_width": self._on_page_width,
             "center_page": self._on_center_page,
             "toggle_grid": self._on_toggle_grid,
+            "enter_edit_mode": self._on_enter_edit_mode,
+            "exit_edit_mode": self._on_exit_edit_mode,
         }
         
         for name, callback in actions.items():
@@ -318,6 +327,12 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         gesture_click.connect("pressed", self._on_canvas_click)
         self.canvas.add_controller(gesture_click)
         
+        # Add right-click gesture for context menu
+        gesture_right_click = Gtk.GestureClick.new()
+        gesture_right_click.set_button(3)  # Right button
+        gesture_right_click.connect("pressed", self._on_canvas_right_click)
+        self.canvas.add_controller(gesture_right_click)
+        
         # Add gesture drag for moving/resizing elements
         gesture_drag = Gtk.GestureDrag.new()
         gesture_drag.connect("drag-begin", self._on_drag_begin)
@@ -353,6 +368,10 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         # Comic Panel button
         panel_btn = self._create_draggable_button("Comic Panel", "panel")
         elements_box.append(panel_btn)
+        
+        # Custom Panel button
+        custom_panel_btn = self._create_draggable_button("Custom Panel", "custom_panel")
+        elements_box.append(custom_panel_btn)
         
         shape_label = Gtk.Label(label="Shapes", xalign=0)
         shape_label.add_css_class("heading")
@@ -555,6 +574,126 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             cr.rectangle(x, y, w, h)
             cr.stroke()
         
+        elif element.type == ElementType.CUSTOM_PANEL:
+            # Draw custom panel with polygon shape
+            vertices = element.properties.get("vertices", [])
+            if len(vertices) < 3:
+                return  # Need at least 3 vertices
+            
+            border_color = element.properties.get("border_color", "#000000")
+            bg_color = element.properties.get("background_color", "#FFFFFF")
+            image_filename = element.properties.get("image")
+            
+            # Check if panel has an image
+            if image_filename:
+                # Initialize image dimensions if not set
+                if "image_width" not in element.properties or "image_height" not in element.properties:
+                    from PIL import Image
+                    image_path = self.project.images_dir / image_filename
+                    if image_path.exists():
+                        pil_image = Image.open(str(image_path))
+                        img_width, img_height = pil_image.size
+                        
+                        # Scale to fit within panel while maintaining aspect ratio
+                        panel_w = element.width
+                        panel_h = element.height
+                        scale_x = panel_w / img_width
+                        scale_y = panel_h / img_height
+                        scale_factor = min(scale_x, scale_y)
+                        
+                        # Store in page coordinates (unscaled)
+                        element.properties["image_width"] = img_width * scale_factor
+                        element.properties["image_height"] = img_height * scale_factor
+                        
+                        # Store initial centered offset
+                        element.properties["image_offset_x"] = (panel_w - img_width * scale_factor) / 2
+                        element.properties["image_offset_y"] = (panel_h - img_height * scale_factor) / 2
+                
+                # Use stored image dimensions
+                stored_image_width = element.properties.get("image_width", element.width)
+                stored_image_height = element.properties.get("image_height", element.height)
+                stored_offset_x = element.properties.get("image_offset_x", 0)
+                stored_offset_y = element.properties.get("image_offset_y", 0)
+                
+                # Calculate scaled positions
+                img_x = x + stored_offset_x * scale
+                img_y = y + stored_offset_y * scale
+                display_width = stored_image_width * scale
+                display_height = stored_image_height * scale
+                
+                # Get cached surface
+                surface = self._get_cached_image_surface(image_filename, int(stored_image_width), int(stored_image_height))
+                
+                if surface:
+                    # Draw image with clipping to polygon
+                    cr.save()
+                    # Create polygon clipping path
+                    cr.new_path()
+                    for i, (vx, vy) in enumerate(vertices):
+                        px = x + vx * scale
+                        py = y + vy * scale
+                        if i == 0:
+                            cr.move_to(px, py)
+                        else:
+                            cr.line_to(px, py)
+                    cr.close_path()
+                    cr.clip()
+                    
+                    # Draw image
+                    cr.translate(img_x, img_y)
+                    if surface.get_width() > 0 and surface.get_height() > 0:
+                        scale_x = display_width / surface.get_width()
+                        scale_y = display_height / surface.get_height()
+                        cr.scale(scale_x, scale_y)
+                    cr.set_source_surface(surface, 0, 0)
+                    cr.paint()
+                    cr.restore()
+                else:
+                    # Failed to load, show pattern
+                    cr.save()
+                    cr.new_path()
+                    for i, (vx, vy) in enumerate(vertices):
+                        px = x + vx * scale
+                        py = y + vy * scale
+                        if i == 0:
+                            cr.move_to(px, py)
+                        else:
+                            cr.line_to(px, py)
+                    cr.close_path()
+                    cr.clip_preserve()
+                    self._draw_panel_pattern_in_path(cr, x, y, w, h, bg_color, scale)
+                    cr.restore()
+            else:
+                # No image, draw dithered pattern
+                cr.save()
+                cr.new_path()
+                for i, (vx, vy) in enumerate(vertices):
+                    px = x + vx * scale
+                    py = y + vy * scale
+                    if i == 0:
+                        cr.move_to(px, py)
+                    else:
+                        cr.line_to(px, py)
+                cr.close_path()
+                cr.clip_preserve()
+                self._draw_panel_pattern_in_path(cr, x, y, w, h, bg_color, scale)
+                cr.restore()
+            
+            # Draw border
+            cr.new_path()
+            for i, (vx, vy) in enumerate(vertices):
+                px = x + vx * scale
+                py = y + vy * scale
+                if i == 0:
+                    cr.move_to(px, py)
+                else:
+                    cr.line_to(px, py)
+            cr.close_path()
+            border_r, border_g, border_b = self._hex_to_rgb(border_color)
+            cr.set_source_rgb(border_r, border_g, border_b)
+            cr.set_line_width(2)
+            cr.stroke()
+        
         else:
             # Draw other element types (shapes, text, etc.)
             self._draw_other_elements(cr, element, x, y, w, h, scale)
@@ -624,6 +763,17 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 for hx, hy in handles:
                     cr.rectangle(hx, hy, handle_size, handle_size)
                     cr.fill()
+        
+        # Draw vertex handles for custom panels in edit mode
+        if element.type == ElementType.CUSTOM_PANEL and element == self.edit_mode_element:
+            vertices = element.properties.get("vertices", [])
+            handle_size = 8
+            cr.set_source_rgb(0.0, 0.8, 0.0)  # Green for vertex handles
+            for vx, vy in vertices:
+                px = x + vx * scale
+                py = y + vy * scale
+                cr.arc(px, py, handle_size / 2, 0, 2 * 3.14159)
+                cr.fill()
     
     def _get_cached_image_surface(self, image_filename, target_width, target_height):
         """Get or create a cached Cairo surface for an image."""
@@ -713,6 +863,37 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             
             while current_x < x + w:
                 # Only draw dot if it's within the panel bounds
+                if current_x >= x and current_x <= x + w and current_y >= y and current_y <= y + h:
+                    cr.arc(current_x, current_y, dot_size / 2, 0, 2 * 3.14159)
+                    cr.fill()
+                current_x += dot_spacing
+            current_y += dot_spacing
+    
+    def _draw_panel_pattern_in_path(self, cr, x, y, w, h, bg_color, scale):
+        """Draw the dithered dot pattern within the current clipping path."""
+        # Fill with background color first
+        bg_r, bg_g, bg_b = self._hex_to_rgb(bg_color)
+        cr.set_source_rgb(bg_r, bg_g, bg_b)
+        cr.paint()
+        
+        # Draw grey dithered dot pattern
+        cr.set_source_rgb(0.85, 0.85, 0.85)  # Light grey
+        dot_spacing = 8  # pixels between dots
+        dot_size = 2  # size of each dot
+        
+        # Draw dots in a grid pattern
+        start_x = int(x / dot_spacing) * dot_spacing
+        start_y = int(y / dot_spacing) * dot_spacing
+        
+        current_y = start_y
+        while current_y < y + h:
+            current_x = start_x
+            # Alternate rows for dithered effect
+            offset = dot_spacing / 2 if int((current_y - start_y) / dot_spacing) % 2 else 0
+            current_x += offset
+            
+            while current_x < x + w:
+                # Only draw dot if it's within the bounds
                 if current_x >= x and current_x <= x + w and current_y >= y and current_y <= y + h:
                     cr.arc(current_x, current_y, dot_size / 2, 0, 2 * 3.14159)
                     cr.fill()
@@ -879,6 +1060,63 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 cr.set_source_rgb(0.0, 0.8, 0.0)  # Green for tail tip handle
                 cr.arc(tail_tip_x_scaled, tail_tip_y_scaled, handle_size / 2, 0, 2 * math.pi)
                 cr.fill()
+    
+    def _update_custom_panel_bounds(self, element):
+        """Update element x, y, width, height to contain all vertices."""
+        if element.type != ElementType.CUSTOM_PANEL:
+            return
+        
+        vertices = element.properties.get("vertices", [])
+        if len(vertices) < 3:
+            return
+        
+        # Find bounding box
+        min_x = float('inf')
+        max_x = float('-inf')
+        min_y = float('inf')
+        max_y = float('-inf')
+        
+        for vertex in vertices:
+            vx, vy = vertex if isinstance(vertex, (list, tuple)) else (vertex.get("x", 0), vertex.get("y", 0))
+            min_x = min(min_x, vx)
+            max_x = max(max_x, vx)
+            min_y = min(min_y, vy)
+            max_y = max(max_y, vy)
+        
+        # Update vertices to be relative to new origin
+        new_vertices = []
+        for vertex in vertices:
+            vx, vy = vertex if isinstance(vertex, (list, tuple)) else (vertex.get("x", 0), vertex.get("y", 0))
+            new_vertices.append((vx - min_x, vy - min_y))
+        
+        # Update element position and size
+        element.x += min_x
+        element.y += min_y
+        element.width = max_x - min_x
+        element.height = max_y - min_y
+        element.properties["vertices"] = new_vertices
+    
+    def _point_to_segment_distance(self, px, py, x1, y1, x2, y2):
+        """Calculate the distance from point (px, py) to line segment (x1, y1)-(x2, y2)."""
+        import math
+        
+        # Vector from start to end of segment
+        dx = x2 - x1
+        dy = y2 - y1
+        
+        # If segment is actually a point
+        if dx == 0 and dy == 0:
+            return math.sqrt((px - x1)**2 + (py - y1)**2)
+        
+        # Calculate parameter t for projection onto line
+        t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)))
+        
+        # Find closest point on segment
+        closest_x = x1 + t * dx
+        closest_y = y1 + t * dy
+        
+        # Return distance to closest point
+        return math.sqrt((px - closest_x)**2 + (py - closest_y)**2)
     
     def _hex_to_rgb(self, hex_color):
         """Convert hex color to RGB tuple (0-1 range)."""
@@ -1108,6 +1346,21 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         self.grid_visible = not self.grid_visible
         self.canvas.queue_draw()
     
+    def _on_enter_edit_mode(self, action, param):
+        """Enter edit mode for the selected custom panel."""
+        if not self.selected_elements:
+            return
+        
+        element = self.selected_elements[0]
+        if element.type == ElementType.CUSTOM_PANEL:
+            self.edit_mode_element = element
+            self.canvas.queue_draw()
+    
+    def _on_exit_edit_mode(self, action, param):
+        """Exit edit mode for custom panel."""
+        self.edit_mode_element = None
+        self.canvas.queue_draw()
+    
     def _on_canvas_scroll(self, controller, dx, dy):
         """Handle scroll events on canvas for zooming."""
         # Get modifier state to check for Shift key - don't zoom while panning
@@ -1142,12 +1395,27 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 self._on_zoom_out(None, None)
                 return True
         
-        # Delete key to remove selected elements
+        # Delete key to remove selected vertex or selected elements
         if keyval in (Gdk.KEY_Delete, Gdk.KEY_KP_Delete, Gdk.KEY_BackSpace):
-            if self.selected_elements and self.current_page:
+            # Check if we're in edit mode with a selected vertex
+            if self.edit_mode_element and self.selected_vertex is not None:
+                element = self.edit_mode_element
+                if element.type == ElementType.CUSTOM_PANEL:
+                    vertices = element.properties.get("vertices", [])
+                    # Only remove if we have more than 3 vertices (minimum for a polygon)
+                    if len(vertices) > 3:
+                        vertices.pop(self.selected_vertex)
+                        element.properties["vertices"] = vertices
+                        self._update_custom_panel_bounds(element)
+                        self.selected_vertex = None
+                        self.canvas.queue_draw()
+                        return True
+            # Otherwise, delete selected elements
+            elif self.selected_elements and self.current_page:
                 for element in self.selected_elements:
                     self.current_page.elements.remove(element)
                 self.selected_elements = []
+                self.edit_mode_element = None  # Exit edit mode if deleting element
                 self._update_layer_buttons()
                 self.canvas.queue_draw()
                 return True
@@ -1252,7 +1520,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         # Check if dropped on an existing panel
         target_panel = None
         for element in reversed(self.current_page.elements):
-            if (element.type == ElementType.PANEL and
+            if ((element.type == ElementType.PANEL or element.type == ElementType.CUSTOM_PANEL) and
                 element.x <= page_x <= element.x + element.width and
                 element.y <= page_y <= element.y + element.height):
                 target_panel = element
@@ -1354,6 +1622,26 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 background_color="#FFFFFF"
             )
         
+        elif element_type == "custom_panel":
+            # Create custom panel with 4 corner vertices (20% of page size)
+            width = self.current_page.width * 0.2
+            height = self.current_page.height * 0.2
+            # Vertices stored as list of (x, y) tuples relative to element origin
+            vertices = [
+                (0, 0),              # top-left
+                (width, 0),          # top-right
+                (width, height),     # bottom-right
+                (0, height)          # bottom-left
+            ]
+            return Element(
+                ElementType.CUSTOM_PANEL,
+                x, y, width, height,
+                vertices=vertices,
+                border_color=self.config.get("panel_border_color", "#000000"),
+                border_width=self.config.get("panel_border_width", 2),
+                background_color="#FFFFFF"
+            )
+        
         elif element_type.startswith("shape:"):
             shape_name = element_type.split(":")[1]
             return Element(
@@ -1436,6 +1724,11 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         if not self.current_page:
             return
         
+        # Check for Ctrl modifier for adding vertices
+        event = gesture.get_current_event()
+        modifiers = event.get_modifier_state()
+        ctrl_pressed = modifiers & Gdk.ModifierType.CONTROL_MASK
+        
         # Calculate position relative to page
         scale = self.zoom_level / 100.0
         page_width = self.current_page.width * scale
@@ -1448,6 +1741,45 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         # Convert canvas coordinates to page coordinates
         page_x = (x - x_offset) / scale
         page_y = (y - y_offset) / scale
+        
+        # Handle Ctrl+Click to add vertex in edit mode
+        if ctrl_pressed and self.edit_mode_element and n_press == 1:
+            element = self.edit_mode_element
+            if element.type == ElementType.CUSTOM_PANEL:
+                # Find closest edge and insert vertex
+                vertices = element.properties.get("vertices", [])
+                if len(vertices) >= 3:
+                    # Convert click to element-relative coordinates
+                    rel_x = page_x - element.x
+                    rel_y = page_y - element.y
+                    
+                    # Find closest edge
+                    closest_edge = None
+                    min_distance = float('inf')
+                    
+                    for i in range(len(vertices)):
+                        v1 = vertices[i]
+                        v2 = vertices[(i + 1) % len(vertices)]
+                        
+                        # Extract coordinates
+                        v1x, v1y = v1 if isinstance(v1, (list, tuple)) else (v1.get("x", 0), v1.get("y", 0))
+                        v2x, v2y = v2 if isinstance(v2, (list, tuple)) else (v2.get("x", 0), v2.get("y", 0))
+                        
+                        # Calculate distance from point to line segment
+                        distance = self._point_to_segment_distance(rel_x, rel_y, v1x, v1y, v2x, v2y)
+                        
+                        if distance < min_distance:
+                            min_distance = distance
+                            closest_edge = i
+                    
+                    # If close enough to an edge (within 10 pixels), insert vertex
+                    if closest_edge is not None and min_distance < 10 / scale:
+                        # Insert new vertex after closest_edge
+                        new_vertices = vertices[:closest_edge + 1] + [(rel_x, rel_y)] + vertices[closest_edge + 1:]
+                        element.properties["vertices"] = new_vertices
+                        self._update_custom_panel_bounds(element)
+                        self.canvas.queue_draw()
+                        return
         
         # Find clicked element (top to bottom)
         clicked_element = None
@@ -1520,6 +1852,42 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         self._update_layer_buttons()
         self.canvas.queue_draw()
     
+    def _on_canvas_right_click(self, gesture, n_press, x, y):
+        """Handle right-click on canvas for context menu."""
+        if not self.current_page or not self.selected_elements:
+            return
+        
+        element = self.selected_elements[0]
+        
+        # Only show context menu for custom panels
+        if element.type != ElementType.CUSTOM_PANEL:
+            return
+        
+        # Create context menu
+        menu = Gio.Menu()
+        
+        if element == self.edit_mode_element:
+            # Currently in edit mode - offer to exit
+            menu.append("Exit Edit Mode", "win.exit_edit_mode")
+        else:
+            # Not in edit mode - offer to enter
+            menu.append("Edit Shape", "win.enter_edit_mode")
+        
+        # Create and show popover menu
+        popover = Gtk.PopoverMenu()
+        popover.set_menu_model(menu)
+        popover.set_parent(self.canvas)
+        
+        # Position popover at click location
+        rect = Gdk.Rectangle()
+        rect.x = int(x)
+        rect.y = int(y)
+        rect.width = 1
+        rect.height = 1
+        popover.set_pointing_to(rect)
+        
+        popover.popup()
+    
     def _on_drag_begin(self, gesture, start_x, start_y):
         """Handle drag begin for moving/resizing elements or panning (Shift+drag)."""
         if not self.current_page:
@@ -1556,6 +1924,29 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         # Convert canvas coordinates to page coordinates
         page_x = (start_x - x_offset) / scale
         page_y = (start_y - y_offset) / scale
+        
+        # Check if clicking on custom panel vertex handle in edit mode
+        if element.type == ElementType.CUSTOM_PANEL and element == self.edit_mode_element:
+            vertices = element.properties.get("vertices", [])
+            handle_size = 8 / scale
+            
+            for i, vertex in enumerate(vertices):
+                vx, vy = vertex if isinstance(vertex, (list, tuple)) else (vertex.get("x", 0), vertex.get("y", 0))
+                vertex_x = element.x + vx
+                vertex_y = element.y + vy
+                
+                # Check if click is on this vertex handle
+                if (abs(page_x - vertex_x) < handle_size and
+                    abs(page_y - vertex_y) < handle_size):
+                    # Select this vertex and start dragging
+                    self.selected_vertex = i
+                    self.dragging_vertex = i
+                    self.drag_start_x = page_x
+                    self.drag_start_y = page_y
+                    # Store initial vertex position
+                    self.vertex_start_x = vx
+                    self.vertex_start_y = vy
+                    return
         
         # Check if clicking on speech bubble tail tip handle
         if element.type == ElementType.SPEECH_BUBBLE:
@@ -1689,6 +2080,26 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         # Convert offset from canvas to page coordinates
         dx = offset_x / scale
         dy = offset_y / scale
+        
+        # Handle vertex dragging for custom panels
+        if self.dragging_vertex is not None:
+            element = self.selected_elements[0] if self.selected_elements else None
+            if element and element.type == ElementType.CUSTOM_PANEL:
+                vertices = element.properties.get("vertices", [])
+                if 0 <= self.dragging_vertex < len(vertices):
+                    # Update vertex position based on drag from start position
+                    new_x = self.vertex_start_x + dx
+                    new_y = self.vertex_start_y + dy
+                    
+                    # Update vertex (handle both list and tuple formats)
+                    if isinstance(vertices[self.dragging_vertex], (list, tuple)):
+                        vertices[self.dragging_vertex] = [new_x, new_y]
+                    else:
+                        vertices[self.dragging_vertex] = {"x": new_x, "y": new_y}
+                    
+                    element.properties["vertices"] = vertices
+                    self.canvas.queue_draw()
+            return
         
         if self.dragging_element:
             if self.dragging_tail:
@@ -1824,11 +2235,20 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             # Trigger a redraw to load the image at the new size
             self.canvas.queue_draw()
         
+        # If we were dragging a vertex, update panel bounds
+        if self.dragging_vertex is not None and self.selected_elements:
+            element = self.selected_elements[0]
+            if element.type == ElementType.CUSTOM_PANEL:
+                self._update_custom_panel_bounds(element)
+        
         self.dragging_element = None
         self.dragging_image = False
         self.dragging_tail = False
+        self.dragging_vertex = None
         self.tail_start_x = 0
         self.tail_start_y = 0
+        self.vertex_start_x = 0
+        self.vertex_start_y = 0
         self.resizing_element = None
         self.resizing_image = False
         self.resize_handle = None

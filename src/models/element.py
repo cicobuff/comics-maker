@@ -5,6 +5,7 @@ import uuid
 
 class ElementType(Enum):
     PANEL = "panel"
+    CUSTOM_PANEL = "custom_panel"
     SHAPE = "shape"
     TEXTAREA = "textarea"
     SPEECH_BUBBLE = "speech_bubble"
