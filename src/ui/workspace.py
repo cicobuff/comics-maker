@@ -50,11 +50,17 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         self.image_start_offset_y = 0
         
         # Custom panel edit mode state
-        self.edit_mode_element = None  # Element currently in edit mode
+        self.edit_mode_element = None  # Element currently in edit mode (custom panel or speech bubble)
         self.selected_vertex = None  # Index of selected vertex for deletion
         self.dragging_vertex = None  # Index of vertex being dragged
         self.vertex_start_x = 0
         self.vertex_start_y = 0
+        
+        # Speech bubble edit mode state
+        self.dragging_bubble_control = None  # Index of control point being dragged
+        self.dragging_tail_tip = False  # True if dragging tail tip
+        self.dragging_tail_base = False  # True if dragging tail base along curve
+        self.tail_base_t_start = 0  # Initial tail_base_t value
         
         # Image cache to avoid reloading images on every frame
         self.image_cache = {}  # key: (filename, width, height), value: cairo surface
@@ -968,7 +974,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             cr.show_text(element.properties.get("text", "Enter text here"))
         
         elif element.type == ElementType.SPEECH_BUBBLE:
-            # Draw speech bubble with dynamic tail
+            # Draw speech bubble
             import math
             
             # Start with a clean path state
@@ -978,18 +984,104 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             text = element.properties.get("text", "Enter text here")
             text_color = element.properties.get("text_color", "#000000")
             
-            # Get tail properties
-            tail_tip_x = element.properties.get("tail_tip_x", w / 2)
-            tail_tip_y = element.properties.get("tail_tip_y", h + 50)
-            tail_base_width = element.properties.get("tail_base_width", 30)
+            # Check if this is the new spline-based round bubble
+            control_points = element.properties.get("control_points")
             
-            # Scale tail coordinates
-            tail_tip_x_scaled = x + (tail_tip_x * w / element.width)
-            tail_tip_y_scaled = y + (tail_tip_y * h / element.height)
-            tail_base_width_scaled = tail_base_width * scale
+            if bubble_type == "round" and control_points:
+                # New spline-based round bubble
+                # Scale control points to screen coordinates
+                scaled_points = [(x + px * w / element.width, y + py * h / element.height) 
+                                for px, py in control_points]
+                
+                # Get tail properties
+                tail_base_t = element.properties.get("tail_base_t", 0.75)
+                tail_tip_x = element.properties.get("tail_tip_x", w / 2)
+                tail_tip_y = element.properties.get("tail_tip_y", h + 50)
+                
+                # Scale tail tip
+                tail_tip_x_scaled = x + (tail_tip_x * w / element.width)
+                tail_tip_y_scaled = y + (tail_tip_y * h / element.height)
+                
+                # Calculate tail base position on curve
+                tail_base_pos = self._eval_bubble_curve_at_t(scaled_points, tail_base_t)
+                tail_base_tangent = self._eval_bubble_curve_tangent_at_t(scaled_points, tail_base_t)
+                
+                # Calculate perpendicular to tangent for tail width
+                tail_width = 30 * scale
+                tangent_len = math.sqrt(tail_base_tangent[0]**2 + tail_base_tangent[1]**2)
+                if tangent_len > 0:
+                    perp_x = -tail_base_tangent[1] / tangent_len * tail_width / 2
+                    perp_y = tail_base_tangent[0] / tangent_len * tail_width / 2
+                else:
+                    perp_x, perp_y = 0, 0
+                
+                tail_left = (tail_base_pos[0] + perp_x, tail_base_pos[1] + perp_y)
+                tail_right = (tail_base_pos[0] - perp_x, tail_base_pos[1] - perp_y)
+                
+                # Draw tail (behind bubble)
+                cr.set_source_rgb(1, 1, 1)  # White fill
+                cr.move_to(tail_left[0], tail_left[1])
+                cr.line_to(tail_right[0], tail_right[1])
+                cr.line_to(tail_tip_x_scaled, tail_tip_y_scaled)
+                cr.close_path()
+                cr.fill_preserve()
+                cr.set_source_rgb(0, 0, 0)  # Black stroke
+                cr.set_line_width(2)
+                cr.stroke()
+                
+                # Draw bubble spline curve
+                segments = self._get_bubble_curve_segments(scaled_points)
+                
+                cr.new_path()
+                for i, segment in enumerate(segments):
+                    p0, p1, p2, p3 = segment
+                    if i == 0:
+                        cr.move_to(p0[0], p0[1])
+                    cr.curve_to(p1[0], p1[1], p2[0], p2[1], p3[0], p3[1])
+                
+                cr.close_path()
+                cr.set_source_rgb(1, 1, 1)  # White fill
+                cr.fill_preserve()
+                cr.set_source_rgb(0, 0, 0)  # Black stroke
+                cr.set_line_width(3)
+                cr.stroke()
+                
+                # Draw text in text area
+                text_r, text_g, text_b = self._hex_to_rgb(text_color)
+                cr.set_source_rgb(text_r, text_g, text_b)
+                
+                text_area_x = element.properties.get("text_area_x", 30) * (w / element.width)
+                text_area_y = element.properties.get("text_area_y", 30) * (h / element.height)
+                font_size = element.properties.get("font_size", 14)
+                
+                cr.select_font_face(element.properties.get("font", "Arial"))
+                cr.set_font_size(font_size)
+                cr.move_to(x + text_area_x, y + text_area_y + font_size)
+                cr.show_text(text)
+                
+                # Draw handles if selected
+                if element in self.selected_elements:
+                    # Bright pink tail handles
+                    handle_size = 8
+                    
+                    # Tail tip handle (bright pink)
+                    cr.set_source_rgb(1.0, 0.08, 0.58)  # Hot pink
+                    cr.arc(tail_tip_x_scaled, tail_tip_y_scaled, handle_size / 2, 0, 2 * math.pi)
+                    cr.fill()
+                    
+                    # Tail base handle (bright pink)
+                    cr.set_source_rgb(1.0, 0.08, 0.58)  # Hot pink
+                    cr.arc(tail_base_pos[0], tail_base_pos[1], handle_size / 2, 0, 2 * math.pi)
+                    cr.fill()
+                    
+                    # Control point handles (green) if in edit mode
+                    if element == self.edit_mode_element:
+                        cr.set_source_rgb(0.0, 0.8, 0.0)  # Green
+                        for px, py in scaled_points:
+                            cr.arc(px, py, handle_size / 2, 0, 2 * math.pi)
+                            cr.fill()
             
-            # Draw tail first (behind bubble body)
-            if bubble_type == "round":
+            elif bubble_type == "round":
                 # Calculate tail connection points on bubble edge
                 # Find angle from bubble center to tail tip
                 bubble_center_x = x + w / 2
@@ -1078,6 +1170,122 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 cr.set_source_rgb(0.0, 0.8, 0.0)  # Green for tail tip handle
                 cr.arc(tail_tip_x_scaled, tail_tip_y_scaled, handle_size / 2, 0, 2 * math.pi)
                 cr.fill()
+    
+    def _catmull_rom_to_bezier(self, p0, p1, p2, p3):
+        """Convert Catmull-Rom curve segment to cubic Bézier control points."""
+        # Catmull-Rom to Bézier conversion
+        # Returns: (p1, control1, control2, p2)
+        c1x = p1[0] + (p2[0] - p0[0]) / 6.0
+        c1y = p1[1] + (p2[1] - p0[1]) / 6.0
+        
+        c2x = p2[0] - (p3[0] - p1[0]) / 6.0
+        c2y = p2[1] - (p3[1] - p1[1]) / 6.0
+        
+        return (p1, (c1x, c1y), (c2x, c2y), p2)
+    
+    def _eval_bezier_point(self, p0, p1, p2, p3, t):
+        """Evaluate a cubic Bézier curve at parameter t (0 to 1)."""
+        # Cubic Bézier formula: B(t) = (1-t)³P0 + 3(1-t)²tP1 + 3(1-t)t²P2 + t³P3
+        u = 1 - t
+        tt = t * t
+        uu = u * u
+        uuu = uu * u
+        ttt = tt * t
+        
+        x = uuu * p0[0] + 3 * uu * t * p1[0] + 3 * u * tt * p2[0] + ttt * p3[0]
+        y = uuu * p0[1] + 3 * uu * t * p1[1] + 3 * u * tt * p2[1] + ttt * p3[1]
+        
+        return (x, y)
+    
+    def _eval_bezier_tangent(self, p0, p1, p2, p3, t):
+        """Evaluate tangent vector at parameter t on a cubic Bézier curve."""
+        # Derivative of cubic Bézier
+        u = 1 - t
+        
+        dx = 3 * u * u * (p1[0] - p0[0]) + 6 * u * t * (p2[0] - p1[0]) + 3 * t * t * (p3[0] - p2[0])
+        dy = 3 * u * u * (p1[1] - p0[1]) + 6 * u * t * (p2[1] - p1[1]) + 3 * t * t * (p3[1] - p2[1])
+        
+        return (dx, dy)
+    
+    def _get_bubble_curve_segments(self, control_points):
+        """Convert control points to Bézier curve segments for closed spline."""
+        # Create a closed Catmull-Rom spline through the control points
+        segments = []
+        n = len(control_points)
+        
+        for i in range(n):
+            p0 = control_points[(i - 1) % n]
+            p1 = control_points[i]
+            p2 = control_points[(i + 1) % n]
+            p3 = control_points[(i + 2) % n]
+            
+            bezier = self._catmull_rom_to_bezier(p0, p1, p2, p3)
+            segments.append(bezier)
+        
+        return segments
+    
+    def _eval_bubble_curve_at_t(self, control_points, t):
+        """Evaluate position on the closed bubble curve at global parameter t (0 to 1)."""
+        segments = self._get_bubble_curve_segments(control_points)
+        n = len(segments)
+        
+        # t is global parameter around the whole curve
+        # Map to segment and local t
+        segment_t = t * n
+        segment_idx = int(segment_t) % n
+        local_t = segment_t - int(segment_t)
+        
+        segment = segments[segment_idx]
+        return self._eval_bezier_point(segment[0], segment[1], segment[2], segment[3], local_t)
+    
+    def _eval_bubble_curve_tangent_at_t(self, control_points, t):
+        """Evaluate tangent at global parameter t on the bubble curve."""
+        segments = self._get_bubble_curve_segments(control_points)
+        n = len(segments)
+        
+        segment_t = t * n
+        segment_idx = int(segment_t) % n
+        local_t = segment_t - int(segment_t)
+        
+        segment = segments[segment_idx]
+        return self._eval_bezier_tangent(segment[0], segment[1], segment[2], segment[3], local_t)
+    
+    def _find_closest_point_on_curve(self, control_points, target_x, target_y):
+        """Find parameter t (0 to 1) for the closest point on curve to target position."""
+        import math
+        
+        # Sample the curve at many points to find closest
+        samples = 100
+        min_dist = float('inf')
+        closest_t = 0
+        
+        for i in range(samples):
+            t = i / samples
+            px, py = self._eval_bubble_curve_at_t(control_points, t)
+            dist = math.sqrt((px - target_x)**2 + (py - target_y)**2)
+            
+            if dist < min_dist:
+                min_dist = dist
+                closest_t = t
+        
+        # Refine with a finer search around the best sample
+        step = 1.0 / samples
+        for i in range(10):
+            t_start = max(0, closest_t - step)
+            t_end = min(1, closest_t + step)
+            
+            for j in range(10):
+                t = t_start + (t_end - t_start) * j / 10
+                px, py = self._eval_bubble_curve_at_t(control_points, t)
+                dist = math.sqrt((px - target_x)**2 + (py - target_y)**2)
+                
+                if dist < min_dist:
+                    min_dist = dist
+                    closest_t = t
+            
+            step /= 10
+        
+        return closest_t
     
     def _update_custom_panel_bounds(self, element):
         """Update element x, y, width, height to contain all vertices."""
@@ -1365,7 +1573,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         self.canvas.queue_draw()
     
     def _on_enter_edit_mode(self, action, param):
-        """Enter edit mode for the selected custom panel."""
+        """Enter edit mode for the selected custom panel or speech bubble."""
         if not self.selected_elements:
             return
         
@@ -1373,6 +1581,12 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         if element.type == ElementType.CUSTOM_PANEL:
             self.edit_mode_element = element
             self.canvas.queue_draw()
+        elif element.type == ElementType.SPEECH_BUBBLE:
+            # Only spline-based round bubbles support edit mode
+            if (element.properties.get("bubble_type") == "round" and
+                element.properties.get("control_points") is not None):
+                self.edit_mode_element = element
+                self.canvas.queue_draw()
     
     def _on_exit_edit_mode(self, action, param):
         """Exit edit mode for custom panel."""
@@ -1684,44 +1898,61 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         elif element_type.startswith("speech_bubble:"):
             bubble_type = element_type.split(":")[1]
             
-            # Load bubble configuration from assets
-            import json
-            from pathlib import Path
-            
-            bubble_dir = Path(__file__).parent.parent.parent / "assets" / "speech_bubbles" / bubble_type
-            info_file = bubble_dir / "info.json"
-            
-            if info_file.exists():
-                with open(info_file, 'r') as f:
-                    info = json.load(f)
+            if bubble_type == "round":
+                # New spline-based round bubble
+                import math
+                width = 200
+                height = 150
                 
-                text_area = info.get("text_area", {})
+                # Create 4 control points for a circular bubble
+                # Points are placed to form a circle using the width and height as bounding box
+                cx = width / 2  # center x
+                cy = height / 2  # center y
+                rx = width / 2  # radius x
+                ry = height / 2  # radius y
                 
-                width = info.get("default_width", 200)
-                height = info.get("default_height", 150)
+                # 4 control points at top, right, bottom, left (relative to element origin)
+                control_points = [
+                    (cx, 0),              # top
+                    (width, cy),          # right
+                    (cx, height),         # bottom
+                    (0, cy)               # left
+                ]
+                
+                # Tail properties
+                # tail_base_t: parameter along curve (0.0 to 1.0), 0.75 = bottom position
+                tail_base_t = 0.75  # Start at bottom
+                # tail_tip: free-moving point (relative to element origin)
+                tail_tip_x = cx - 30
+                tail_tip_y = height + 50
+                
+                # Text area (centered in bubble)
+                text_area_x = 30
+                text_area_y = 30
+                text_area_width = width - 60
+                text_area_height = height - 60
                 
                 return Element(
                     ElementType.SPEECH_BUBBLE,
                     x, y, width, height,
-                    bubble_type=bubble_type,
-                    text=info.get("default_text", "Enter text here"),
-                    font=text_area.get("font", "Arial"),
-                    font_size=text_area.get("font_size", 12),
-                    text_color=text_area.get("text_color", "#000000"),
-                    text_align=text_area.get("text_align", "center"),
-                    vertical_align=text_area.get("vertical_align", "middle"),
-                    text_area_x=text_area.get("x", 20),
-                    text_area_y=text_area.get("y", 20),
-                    text_area_width=text_area.get("width", 160),
-                    text_area_height=text_area.get("height", 110),
-                    text_area_padding=text_area.get("padding", 10),
-                    # Tail properties - default to pointing down-left from bottom of bubble
-                    tail_tip_x=width / 2 - 30,  # Relative to bubble origin
-                    tail_tip_y=height + 50,
-                    tail_base_width=30
+                    bubble_type="round",
+                    control_points=control_points,
+                    tail_base_t=tail_base_t,
+                    tail_tip_x=tail_tip_x,
+                    tail_tip_y=tail_tip_y,
+                    text="Enter text here",
+                    font="Arial",
+                    font_size=14,
+                    text_color="#000000",
+                    text_align="center",
+                    vertical_align="middle",
+                    text_area_x=text_area_x,
+                    text_area_y=text_area_y,
+                    text_area_width=text_area_width,
+                    text_area_height=text_area_height
                 )
             else:
-                # Fallback to simple bubble if assets not found
+                # Fallback for other bubble types (thought bubble, etc.)
                 return Element(
                     ElementType.SPEECH_BUBBLE,
                     x, y, 200, 150,
@@ -1879,8 +2110,13 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         
         element = self.selected_elements[0]
         
-        # Only show context menu for custom panels
-        if element.type != ElementType.CUSTOM_PANEL:
+        # Only show context menu for custom panels and spline-based speech bubbles
+        is_custom_panel = element.type == ElementType.CUSTOM_PANEL
+        is_spline_bubble = (element.type == ElementType.SPEECH_BUBBLE and 
+                           element.properties.get("bubble_type") == "round" and
+                           element.properties.get("control_points") is not None)
+        
+        if not (is_custom_panel or is_spline_bubble):
             return
         
         # Create context menu
@@ -1970,24 +2206,72 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                     self.vertex_start_y = vy
                     return
         
-        # Check if clicking on speech bubble tail tip handle
+        # Check if clicking on speech bubble handles
         if element.type == ElementType.SPEECH_BUBBLE:
-            tail_tip_x = element.properties.get("tail_tip_x", element.width / 2)
-            tail_tip_y = element.properties.get("tail_tip_y", element.height + 50)
+            control_points = element.properties.get("control_points")
             
-            # Check if click is on tail tip handle
-            handle_size = 8 / scale
-            if (abs(page_x - (element.x + tail_tip_x)) < handle_size and
-                abs(page_y - (element.y + tail_tip_y)) < handle_size):
-                # Start dragging tail tip
-                self.dragging_element = element
-                self.dragging_tail = True
-                self.drag_start_x = page_x
-                self.drag_start_y = page_y
-                # Store initial tail tip position
-                self.tail_start_x = tail_tip_x
-                self.tail_start_y = tail_tip_y
-                return
+            if control_points:  # Spline-based bubble
+                handle_size = 8 / scale
+                
+                # Scale control points to page coordinates
+                scaled_points = [(element.x + px, element.y + py) for px, py in control_points]
+                
+                # Get tail properties
+                tail_base_t = element.properties.get("tail_base_t", 0.75)
+                tail_tip_x = element.properties.get("tail_tip_x", element.width / 2)
+                tail_tip_y = element.properties.get("tail_tip_y", element.height + 50)
+                tail_tip_px = element.x + tail_tip_x
+                tail_tip_py = element.y + tail_tip_y
+                
+                # Calculate tail base position
+                tail_base_pos = self._eval_bubble_curve_at_t(scaled_points, tail_base_t)
+                
+                # Check if clicking on tail tip handle (bright pink)
+                if (abs(page_x - tail_tip_px) < handle_size and
+                    abs(page_y - tail_tip_py) < handle_size):
+                    self.dragging_tail_tip = True
+                    self.drag_start_x = page_x
+                    self.drag_start_y = page_y
+                    self.tail_start_x = tail_tip_x
+                    self.tail_start_y = tail_tip_y
+                    return
+                
+                # Check if clicking on tail base handle (bright pink - constrained to curve)
+                if (abs(page_x - tail_base_pos[0]) < handle_size and
+                    abs(page_y - tail_base_pos[1]) < handle_size):
+                    self.dragging_tail_base = True
+                    self.drag_start_x = page_x
+                    self.drag_start_y = page_y
+                    self.tail_base_t_start = tail_base_t
+                    return
+                
+                # Check if clicking on control point handles (green - only in edit mode)
+                if element == self.edit_mode_element:
+                    for i, (px, py) in enumerate(scaled_points):
+                        if (abs(page_x - px) < handle_size and
+                            abs(page_y - py) < handle_size):
+                            self.dragging_bubble_control = i
+                            self.drag_start_x = page_x
+                            self.drag_start_y = page_y
+                            # Store start position relative to element origin
+                            self.vertex_start_x = control_points[i][0]
+                            self.vertex_start_y = control_points[i][1]
+                            return
+            else:
+                # Old-style bubble (fallback)
+                tail_tip_x = element.properties.get("tail_tip_x", element.width / 2)
+                tail_tip_y = element.properties.get("tail_tip_y", element.height + 50)
+                
+                handle_size = 8 / scale
+                if (abs(page_x - (element.x + tail_tip_x)) < handle_size and
+                    abs(page_y - (element.y + tail_tip_y)) < handle_size):
+                    self.dragging_element = element
+                    self.dragging_tail = True
+                    self.drag_start_x = page_x
+                    self.drag_start_y = page_y
+                    self.tail_start_x = tail_tip_x
+                    self.tail_start_y = tail_tip_y
+                    return
         
         # Handle based on selection mode
         if self.selection_mode == 'image' and (element.type == ElementType.PANEL or element.type == ElementType.CUSTOM_PANEL) and element.properties.get("image"):
@@ -2125,6 +2409,51 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                         vertices[self.dragging_vertex] = {"x": new_x, "y": new_y}
                     
                     element.properties["vertices"] = vertices
+                    self.canvas.queue_draw()
+            return
+        
+        # Handle speech bubble control point dragging
+        if self.dragging_bubble_control is not None:
+            element = self.selected_elements[0] if self.selected_elements else None
+            if element and element.type == ElementType.SPEECH_BUBBLE:
+                control_points = element.properties.get("control_points", [])
+                if 0 <= self.dragging_bubble_control < len(control_points):
+                    # Update control point position
+                    new_x = self.vertex_start_x + dx
+                    new_y = self.vertex_start_y + dy
+                    control_points[self.dragging_bubble_control] = (new_x, new_y)
+                    element.properties["control_points"] = control_points
+                    self.canvas.queue_draw()
+            return
+        
+        # Handle speech bubble tail tip dragging (free movement)
+        if self.dragging_tail_tip:
+            element = self.selected_elements[0] if self.selected_elements else None
+            if element and element.type == ElementType.SPEECH_BUBBLE:
+                # Update tail tip position
+                element.properties["tail_tip_x"] = self.tail_start_x + dx
+                element.properties["tail_tip_y"] = self.tail_start_y + dy
+                self.canvas.queue_draw()
+            return
+        
+        # Handle speech bubble tail base dragging (constrained to curve)
+        if self.dragging_tail_base:
+            element = self.selected_elements[0] if self.selected_elements else None
+            if element and element.type == ElementType.SPEECH_BUBBLE:
+                control_points = element.properties.get("control_points", [])
+                if control_points:
+                    # Current mouse position in page coordinates
+                    mouse_x = self.drag_start_x + dx
+                    mouse_y = self.drag_start_y + dy
+                    
+                    # Scale control points to page coordinates
+                    scaled_points = [(element.x + px, element.y + py) for px, py in control_points]
+                    
+                    # Find closest point on curve to mouse position
+                    closest_t = self._find_closest_point_on_curve(scaled_points, mouse_x, mouse_y)
+                    
+                    # Update tail_base_t
+                    element.properties["tail_base_t"] = closest_t
                     self.canvas.queue_draw()
             return
         
@@ -2330,6 +2659,12 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         self.temp_image_height = 0
         self.image_start_offset_x = 0
         self.image_start_offset_y = 0
+        
+        # Reset speech bubble drag flags
+        self.dragging_bubble_control = None
+        self.dragging_tail_tip = False
+        self.dragging_tail_base = False
+        self.tail_base_t_start = 0
     
     def _on_canvas_motion(self, controller, x, y):
         """Handle mouse motion for cursor changes."""
