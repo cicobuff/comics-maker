@@ -22,6 +22,13 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         self.zoom_level = 100
         self.grid_visible = False
         
+        # Page panning state (Shift + Left mouse button)
+        self.panning = False
+        self.pan_offset_x = 0  # Accumulated pan offset in pixels
+        self.pan_offset_y = 0
+        self.pan_start_offset_x = 0  # Offset at start of current drag
+        self.pan_start_offset_y = 0
+        
         # Element manipulation state
         self.dragging_element = None
         self.dragging_image = False  # True if dragging the image inside a panel
@@ -59,6 +66,8 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             self.current_page = self.project.pages[0]
             # Refresh pages list to select the current page
             self._refresh_pages_list()
+            # Update canvas size for initial zoom
+            self._update_canvas_size()
     
     def _build_ui(self):
         """Build the workspace UI."""
@@ -407,8 +416,10 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             page_width = self.current_page.width * scale
             page_height = self.current_page.height * scale
             
-            x_offset = max((width - page_width) / 2, 0)
-            y_offset = max((height - page_height) / 2, 0)
+            # Position page at padding offset on the canvas (not centered in viewport)
+            padding = 100
+            x_offset = padding + self.pan_offset_x
+            y_offset = padding + self.pan_offset_y
             
             # Draw page background
             cr.set_source_rgb(1, 1, 1)
@@ -789,6 +800,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         """Handle page selection."""
         if row:
             self.current_page = row.page
+            self._update_canvas_size()
             self.canvas.queue_draw()
     
     def _on_add_page(self, button):
@@ -796,6 +808,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         new_page = self.project.add_page()
         self.current_page = new_page
         self._refresh_pages_list()
+        self._update_canvas_size()
         self.canvas.queue_draw()
     
     def _on_duplicate_page(self, button):
@@ -805,6 +818,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             new_page = self.project.duplicate_page(selected.page)
             self.current_page = new_page
             self._refresh_pages_list()
+            self._update_canvas_size()
             self.canvas.queue_draw()
     
     def _on_delete_page(self, button):
@@ -822,6 +836,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 else:
                     self.current_page = self.project.pages[0]
                 self._refresh_pages_list()
+                self._update_canvas_size()
                 self.canvas.queue_draw()
     
     def _on_new_project(self, action, param):
@@ -877,6 +892,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         max_zoom = self.config.get("max_zoom", 800)
         self.zoom_level = min(self.zoom_level + self.config.get("scroll_zoom_step", 10), max_zoom)
         self.zoom_label.set_text(f"{self.zoom_level}%")
+        self._update_canvas_size()
         self.canvas.queue_draw()
     
     def _on_zoom_out(self, action, param):
@@ -884,6 +900,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         min_zoom = self.config.get("min_zoom", 10)
         self.zoom_level = max(self.zoom_level - self.config.get("scroll_zoom_step", 10), min_zoom)
         self.zoom_label.set_text(f"{self.zoom_level}%")
+        self._update_canvas_size()
         self.canvas.queue_draw()
     
     def _on_full_page(self, action, param):
@@ -895,6 +912,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             zoom_h = (canvas_height / self.current_page.height) * 100
             self.zoom_level = min(zoom_w, zoom_h) * 0.9
             self.zoom_label.set_text(f"{int(self.zoom_level)}%")
+            self._update_canvas_size()
             self.canvas.queue_draw()
     
     def _on_page_width(self, action, param):
@@ -903,25 +921,39 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             canvas_width = self.canvas.get_width()
             self.zoom_level = (canvas_width / self.current_page.width) * 100 * 0.9
             self.zoom_label.set_text(f"{int(self.zoom_level)}%")
+            self._update_canvas_size()
             self.canvas.queue_draw()
     
-    def _on_center_page(self, action, param):
-        """Center the page in the work area."""
+    def _update_canvas_size(self):
+        """Update canvas size based on current zoom level to enable scrolling."""
         if not self.current_page:
             return
         
-        # Update canvas size to match page at current zoom with padding
         scale = self.zoom_level / 100.0
         page_width = self.current_page.width * scale
         page_height = self.current_page.height * scale
         
-        # Add padding around the page for better visibility
+        # Add padding around the page for better visibility and scrolling
         padding = 100
         canvas_width = page_width + padding * 2
         canvas_height = page_height + padding * 2
         
         # Set canvas size to enable scrolling
         self.canvas.set_size_request(int(canvas_width), int(canvas_height))
+    
+    def _on_center_page(self, action, param):
+        """Center the page in the work area."""
+        if not self.current_page:
+            return
+        
+        # Update canvas size for current zoom
+        self._update_canvas_size()
+        
+        # Calculate page dimensions at current zoom
+        scale = self.zoom_level / 100.0
+        page_width = self.current_page.width * scale
+        page_height = self.current_page.height * scale
+        padding = 100
         
         # Force a redraw to update the canvas
         self.canvas.queue_draw()
@@ -963,8 +995,12 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
     
     def _on_canvas_scroll(self, controller, dx, dy):
         """Handle scroll events on canvas for zooming."""
-        # Get modifier state to check for Ctrl key
+        # Get modifier state to check for Shift key - don't zoom while panning
         modifiers = controller.get_current_event_state()
+        
+        # Don't handle scroll events while panning
+        if self.panning or (modifiers & Gdk.ModifierType.SHIFT_MASK):
+            return False
         
         # dy < 0 means scroll up (zoom in), dy > 0 means scroll down (zoom out)
         if dy < 0:
@@ -1321,8 +1357,26 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         self.canvas.queue_draw()
     
     def _on_drag_begin(self, gesture, start_x, start_y):
-        """Handle drag begin for moving/resizing elements."""
-        if not self.current_page or not self.selected_elements:
+        """Handle drag begin for moving/resizing elements or panning (Shift+drag)."""
+        if not self.current_page:
+            return
+        
+        # Check if Shift key is pressed for panning
+        event = gesture.get_current_event()
+        modifiers = event.get_modifier_state()
+        if modifiers & Gdk.ModifierType.SHIFT_MASK:
+            # Start panning mode
+            self.panning = True
+            
+            # Store the current accumulated pan offset as the baseline for this drag
+            self.pan_start_offset_x = self.pan_offset_x
+            self.pan_start_offset_y = self.pan_offset_y
+            
+            self.canvas.set_cursor(Gdk.Cursor.new_from_name("grabbing", None))
+            return
+        
+        # Normal element dragging - require a selected element
+        if not self.selected_elements:
             return
         
         element = self.selected_elements[0]
@@ -1439,7 +1493,16 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 self.element_start_y = element.y
     
     def _on_drag_update(self, gesture, offset_x, offset_y):
-        """Handle drag update for moving/resizing elements."""
+        """Handle drag update for moving/resizing elements or panning."""
+        # Handle panning (Shift+drag)
+        if self.panning:
+            # Update pan offsets - add current drag to accumulated offset
+            self.pan_offset_x = self.pan_start_offset_x + offset_x
+            self.pan_offset_y = self.pan_start_offset_y + offset_y
+            # Trigger redraw
+            self.canvas.queue_draw()
+            return
+        
         scale = self.zoom_level / 100.0
         
         # Convert offset from canvas to page coordinates
@@ -1546,6 +1609,13 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
     
     def _on_drag_end(self, gesture, offset_x, offset_y):
         """Handle drag end."""
+        # If we were panning, just stop - keep the accumulated offset
+        if self.panning:
+            self.panning = False
+            self.canvas.set_cursor(None)
+            # Don't reset pan_offset - keep it accumulated for future draws
+            return
+        
         # If we were resizing an image, apply the final dimensions and clear cache
         if self.resizing_image and self.resizing_element:
             element = self.resizing_element
@@ -1578,6 +1648,15 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         if not self.current_page:
             self.canvas.set_cursor(None)  # Default cursor
             return
+        
+        # Check if Shift key is held for panning mode
+        event = controller.get_current_event()
+        if event:
+            modifiers = event.get_modifier_state()
+            if modifiers & Gdk.ModifierType.SHIFT_MASK:
+                # Shift is held - show grab cursor for panning
+                self.canvas.set_cursor(Gdk.Cursor.new_from_name("grab", None))
+                return
         
         # Calculate position relative to page
         scale = self.zoom_level / 100.0
