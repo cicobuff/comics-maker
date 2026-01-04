@@ -60,9 +60,24 @@ class ComicsMakerApp(Gtk.Application):
     
     def _on_project_selected(self, project):
         """Handle project selection."""
-        workspace = WorkspaceWindow(self, project, self.config, self._show_projects_screen)
+        workspace = WorkspaceWindow(
+            self, 
+            project, 
+            self.config, 
+            self._show_projects_screen,
+            self._on_workspace_closed
+        )
         self.workspace_windows.append(workspace)
         workspace.present()
+    
+    def _on_workspace_closed(self, workspace):
+        """Handle workspace window being closed."""
+        if workspace in self.workspace_windows:
+            self.workspace_windows.remove(workspace)
+        
+        # If no workspace windows are open, show projects screen
+        if len(self.workspace_windows) == 0:
+            self._show_projects_screen()
 
 
 def main():

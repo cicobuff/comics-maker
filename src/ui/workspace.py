@@ -8,11 +8,12 @@ from ..core.undo_manager import UndoManager
 class WorkspaceWindow(Gtk.ApplicationWindow):
     """Main project workspace window."""
     
-    def __init__(self, application, project: Project, config, show_projects_callback=None):
+    def __init__(self, application, project: Project, config, show_projects_callback=None, on_close_callback=None):
         super().__init__(application=application)
         self.project = project
         self.config = config
         self.show_projects_callback = show_projects_callback
+        self.on_close_callback = on_close_callback
         self.undo_manager = UndoManager(config.get("undo_limit", 999))
         self.current_page = None
         self.selected_elements = []
@@ -21,6 +22,9 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         
         self.set_title(f"Comics Maker - {project.name}")
         self.set_default_size(1400, 900)
+        
+        # Connect to close request signal
+        self.connect("close-request", self._on_close_request)
         
         self._build_ui()
         
@@ -415,3 +419,9 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         """Toggle grid visibility."""
         self.grid_visible = not self.grid_visible
         self.canvas.queue_draw()
+    
+    def _on_close_request(self, window):
+        """Handle window close request."""
+        if self.on_close_callback:
+            self.on_close_callback(self)
+        return False
