@@ -112,8 +112,14 @@ class Project:
     def copy_image_to_project(self, source_path: Path) -> str:
         """Copy an image to the project images directory and return the UUID filename."""
         import uuid
+        
+        # Ensure images directory exists
+        self.images_dir.mkdir(parents=True, exist_ok=True)
+        
         file_extension = source_path.suffix
         new_filename = f"{uuid.uuid4()}{file_extension}"
         dest_path = self.images_dir / new_filename
+        
         shutil.copy2(source_path, dest_path)
+        
         return new_filename

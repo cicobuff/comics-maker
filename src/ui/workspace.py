@@ -18,12 +18,15 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         self.undo_manager = UndoManager(config.get("undo_limit", 999))
         self.current_page = None
         self.selected_elements = []
+        self.selection_mode = 'panel'  # 'panel' or 'image' - what's selected in a panel
         self.zoom_level = 100
         self.grid_visible = False
         
         # Element manipulation state
         self.dragging_element = None
+        self.dragging_image = False  # True if dragging the image inside a panel
         self.resizing_element = None
+        self.resizing_image = False  # True if resizing the image inside a panel
         self.resize_handle = None
         self.drag_start_x = 0
         self.drag_start_y = 0
@@ -31,6 +34,11 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         self.element_start_y = 0
         self.element_start_width = 0
         self.element_start_height = 0
+        self.temp_image_width = 0  # Temporary dimensions during drag
+        self.temp_image_height = 0
+        
+        # Image cache to avoid reloading images on every frame
+        self.image_cache = {}  # key: (filename, width, height), value: cairo surface
         
         self.set_title(f"Comics Maker - {project.name}")
         self.set_default_size(1400, 900)
@@ -182,6 +190,36 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         export_btn.connect("clicked", lambda b: self._on_export(None, None))
         toolbar.append(export_btn)
         
+        toolbar.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
+        
+        # Layer ordering buttons
+        layer_label = Gtk.Label(label="Layer:")
+        toolbar.append(layer_label)
+        
+        self.bring_front_btn = Gtk.Button(label="⬆⬆")
+        self.bring_front_btn.set_tooltip_text("Bring to Front")
+        self.bring_front_btn.connect("clicked", self._on_bring_to_front)
+        self.bring_front_btn.set_sensitive(False)
+        toolbar.append(self.bring_front_btn)
+        
+        self.bring_forward_btn = Gtk.Button(label="⬆")
+        self.bring_forward_btn.set_tooltip_text("Bring Forward")
+        self.bring_forward_btn.connect("clicked", self._on_bring_forward)
+        self.bring_forward_btn.set_sensitive(False)
+        toolbar.append(self.bring_forward_btn)
+        
+        self.send_backward_btn = Gtk.Button(label="⬇")
+        self.send_backward_btn.set_tooltip_text("Send Backward")
+        self.send_backward_btn.connect("clicked", self._on_send_backward)
+        self.send_backward_btn.set_sensitive(False)
+        toolbar.append(self.send_backward_btn)
+        
+        self.send_back_btn = Gtk.Button(label="⬇⬇")
+        self.send_back_btn.set_tooltip_text("Send to Back")
+        self.send_back_btn.connect("clicked", self._on_send_to_back)
+        self.send_back_btn.set_sensitive(False)
+        toolbar.append(self.send_back_btn)
+        
         parent_box.append(toolbar)
     
     def _create_left_panel(self):
@@ -244,9 +282,13 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         scroll_controller.connect("scroll", self._on_canvas_scroll)
         self.canvas.add_controller(scroll_controller)
         
-        # Add drop target for drag and drop
-        drop_target = Gtk.DropTarget.new(type=str, actions=Gdk.DragAction.COPY)
-        drop_target.connect("drop", self._on_canvas_drop)
+        # Add drop target for drag and drop (accepts both strings and files)
+        # Create a drop target that accepts multiple types
+        from gi.repository import GObject
+        drop_target = Gtk.DropTarget.new(type=GObject.TYPE_NONE, actions=Gdk.DragAction.COPY)
+        drop_target.set_gtypes([str, Gdk.FileList])
+        drop_target.connect("drop", self._on_canvas_drop_unified)
+        drop_target.connect("accept", self._on_drop_accept)
         self.canvas.add_controller(drop_target)
         
         # Add gesture click for element selection
@@ -381,35 +423,79 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             border_color = element.properties.get("border_color", "#000000")
             bg_color = element.properties.get("background_color", "#FFFFFF")
             
-            # Fill with white background first
-            bg_r, bg_g, bg_b = self._hex_to_rgb(bg_color)
-            cr.set_source_rgb(bg_r, bg_g, bg_b)
-            cr.rectangle(x, y, w, h)
-            cr.fill()
+            # Check if panel has an image
+            image_filename = element.properties.get("image")
             
-            # Draw grey dithered dot pattern
-            cr.set_source_rgb(0.85, 0.85, 0.85)  # Light grey
-            dot_spacing = 8  # pixels between dots
-            dot_size = 2  # size of each dot
-            
-            # Draw dots in a grid pattern
-            start_x = int(x / dot_spacing) * dot_spacing
-            start_y = int(y / dot_spacing) * dot_spacing
-            
-            current_y = start_y
-            while current_y < y + h:
-                current_x = start_x
-                # Alternate rows for dithered effect
-                offset = dot_spacing / 2 if int((current_y - start_y) / dot_spacing) % 2 else 0
-                current_x += offset
+            if image_filename:
+                # If image dimensions not stored yet, calculate and store them now
+                if "image_width" not in element.properties or "image_height" not in element.properties:
+                    from PIL import Image
+                    image_path = self.project.images_dir / image_filename
+                    if image_path.exists():
+                        pil_image = Image.open(str(image_path))
+                        img_width, img_height = pil_image.size
+                        
+                        # Scale to fit within current panel while maintaining aspect ratio
+                        scale_x = w / img_width
+                        scale_y = h / img_height
+                        scale_factor = min(scale_x, scale_y)
+                        
+                        element.properties["image_width"] = img_width * scale_factor
+                        element.properties["image_height"] = img_height * scale_factor
+                        
+                        # Store initial centered offset (relative to panel)
+                        element.properties["image_offset_x"] = (w - img_width * scale_factor) / 2
+                        element.properties["image_offset_y"] = (h - img_height * scale_factor) / 2
                 
-                while current_x < x + w:
-                    # Only draw dot if it's within the panel bounds
-                    if current_x >= x and current_x <= x + w and current_y >= y and current_y <= y + h:
-                        cr.arc(current_x, current_y, dot_size / 2, 0, 2 * 3.14159)
+                # Use stored image dimensions
+                image_width = element.properties.get("image_width", int(w))
+                image_height = element.properties.get("image_height", int(h))
+                
+                # Use stored offset, or default to centered
+                offset_x = element.properties.get("image_offset_x", (w - image_width) / 2)
+                offset_y = element.properties.get("image_offset_y", (h - image_height) / 2)
+                
+                # Draw the image with caching
+                surface = self._get_cached_image_surface(image_filename, int(image_width), int(image_height))
+                
+                if surface:
+                    # The surface is already the correct size
+                    surface_width = surface.get_width()
+                    surface_height = surface.get_height()
+                    
+                    # Position image using stored offset (anchored to top-left of panel)
+                    img_x = x + offset_x
+                    img_y = y + offset_y
+                    
+                    # Draw the image
+                    cr.save()
+                    cr.translate(img_x, img_y)
+                    cr.set_source_surface(surface, 0, 0)
+                    cr.paint()
+                    cr.restore()
+                    
+                    # If currently resizing this image, draw a preview rectangle at the new size
+                    if (self.resizing_image and self.resizing_element == element and 
+                        element in self.selected_elements and self.selection_mode == 'image'):
+                        preview_x = x + offset_x
+                        preview_y = y + offset_y
+                        
+                        # Draw semi-transparent overlay
+                        cr.set_source_rgba(1.0, 0.0, 0.0, 0.2)  # Red with transparency
+                        cr.rectangle(preview_x, preview_y, self.temp_image_width, self.temp_image_height)
                         cr.fill()
-                    current_x += dot_spacing
-                current_y += dot_spacing
+                        
+                        # Draw solid outline
+                        cr.set_source_rgb(1.0, 0.0, 0.0)  # Red
+                        cr.set_line_width(3)
+                        cr.rectangle(preview_x, preview_y, self.temp_image_width, self.temp_image_height)
+                        cr.stroke()
+                else:
+                    # Failed to load, show pattern
+                    self._draw_panel_pattern(cr, x, y, w, h, bg_color)
+            else:
+                # No image, draw dithered pattern
+                self._draw_panel_pattern(cr, x, y, w, h, bg_color)
             
             # Draw border
             border_r, border_g, border_b = self._hex_to_rgb(border_color)
@@ -418,7 +504,178 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             cr.rectangle(x, y, w, h)
             cr.stroke()
         
-        elif element.type == ElementType.SHAPE:
+        else:
+            # Draw other element types (shapes, text, etc.)
+            self._draw_other_elements(cr, element, x, y, w, h)
+        
+        # Draw selection if selected
+        if element in self.selected_elements:
+            if self.selection_mode == 'panel':
+                # Panel selection - blue dotted line
+                selection_color = self.config.get("selection_color", "#0066FF")
+                sel_r, sel_g, sel_b = self._hex_to_rgb(selection_color)
+                cr.set_source_rgb(sel_r, sel_g, sel_b)
+                cr.set_line_width(2)
+                cr.set_dash([5, 5])
+                cr.rectangle(x, y, w, h)
+                cr.stroke()
+                cr.set_dash([])
+                
+                # Draw resize handles for panel
+                handle_size = 8
+                handles = [
+                    (x - handle_size/2, y - handle_size/2),  # Top-left
+                    (x + w - handle_size/2, y - handle_size/2),  # Top-right
+                    (x - handle_size/2, y + h - handle_size/2),  # Bottom-left
+                    (x + w - handle_size/2, y + h - handle_size/2),  # Bottom-right
+                ]
+                cr.set_source_rgb(sel_r, sel_g, sel_b)
+                for hx, hy in handles:
+                    cr.rectangle(hx, hy, handle_size, handle_size)
+                    cr.fill()
+            
+            elif self.selection_mode == 'image' and element.type == ElementType.PANEL and element.properties.get("image"):
+                # Image selection - red solid line around the actual image
+                image_filename = element.properties.get("image")
+                image_width = element.properties.get("image_width", int(w))
+                image_height = element.properties.get("image_height", int(h))
+                
+                # Get stored offset
+                offset_x = element.properties.get("image_offset_x", (w - image_width) / 2)
+                offset_y = element.properties.get("image_offset_y", (h - image_height) / 2)
+                
+                # Use temporary dimensions if currently resizing
+                if self.resizing_image and self.resizing_element == element:
+                    display_width = self.temp_image_width
+                    display_height = self.temp_image_height
+                else:
+                    surface = self._get_cached_image_surface(image_filename, int(image_width), int(image_height))
+                    if surface:
+                        display_width = surface.get_width()
+                        display_height = surface.get_height()
+                    else:
+                        display_width = image_width
+                        display_height = image_height
+                
+                img_x = x + offset_x
+                img_y = y + offset_y
+                
+                # Red solid line for image
+                cr.set_source_rgb(1.0, 0.0, 0.0)  # Red
+                cr.set_line_width(2)
+                cr.rectangle(img_x, img_y, display_width, display_height)
+                cr.stroke()
+                
+                # Draw resize handles for image
+                handle_size = 8
+                handles = [
+                    (img_x - handle_size/2, img_y - handle_size/2),  # Top-left
+                    (img_x + display_width - handle_size/2, img_y - handle_size/2),  # Top-right
+                    (img_x - handle_size/2, img_y + display_height - handle_size/2),  # Bottom-left
+                    (img_x + display_width - handle_size/2, img_y + display_height - handle_size/2),  # Bottom-right
+                ]
+                cr.set_source_rgb(1.0, 0.0, 0.0)  # Red
+                for hx, hy in handles:
+                    cr.rectangle(hx, hy, handle_size, handle_size)
+                    cr.fill()
+    
+    def _get_cached_image_surface(self, image_filename, target_width, target_height):
+        """Get or create a cached Cairo surface for an image."""
+        cache_key = (image_filename, target_width, target_height)
+        
+        # Check cache first
+        if cache_key in self.image_cache:
+            return self.image_cache[cache_key]
+        
+        # Load and process the image
+        try:
+            from PIL import Image
+            import cairo
+            import array
+            
+            image_path = self.project.images_dir / image_filename
+            if not image_path.exists():
+                return None
+            
+            # Load image with PIL
+            pil_image = Image.open(str(image_path))
+            
+            # Convert to RGBA
+            if pil_image.mode != 'RGBA':
+                pil_image = pil_image.convert('RGBA')
+            
+            # Calculate scaling to fit target size while maintaining aspect ratio
+            img_width, img_height = pil_image.size
+            scale_x = target_width / img_width
+            scale_y = target_height / img_height
+            scale_factor = min(scale_x, scale_y)
+            
+            scaled_width = int(img_width * scale_factor)
+            scaled_height = int(img_height * scale_factor)
+            
+            # Resize image
+            pil_image = pil_image.resize((scaled_width, scaled_height), Image.Resampling.LANCZOS)
+            
+            # Convert PIL image to Cairo format (ARGB32)
+            img_data = pil_image.tobytes('raw', 'RGBA')
+            
+            # Create array and reorder bytes from RGBA to BGRA
+            a = array.array('B', img_data)
+            for i in range(0, len(a), 4):
+                a[i], a[i+2] = a[i+2], a[i]  # Swap R and B
+            
+            # Create surface
+            surface = cairo.ImageSurface.create_for_data(
+                a,
+                cairo.FORMAT_ARGB32,
+                scaled_width,
+                scaled_height
+            )
+            
+            # Cache the surface
+            self.image_cache[cache_key] = surface
+            
+            return surface
+            
+        except Exception as e:
+            print(f"Error loading image {image_filename}: {e}")
+            return None
+    
+    def _draw_panel_pattern(self, cr, x, y, w, h, bg_color):
+        """Draw the dithered dot pattern for empty comic panels."""
+        # Fill with white background first
+        bg_r, bg_g, bg_b = self._hex_to_rgb(bg_color)
+        cr.set_source_rgb(bg_r, bg_g, bg_b)
+        cr.rectangle(x, y, w, h)
+        cr.fill()
+        
+        # Draw grey dithered dot pattern
+        cr.set_source_rgb(0.85, 0.85, 0.85)  # Light grey
+        dot_spacing = 8  # pixels between dots
+        dot_size = 2  # size of each dot
+        
+        # Draw dots in a grid pattern
+        start_x = int(x / dot_spacing) * dot_spacing
+        start_y = int(y / dot_spacing) * dot_spacing
+        
+        current_y = start_y
+        while current_y < y + h:
+            current_x = start_x
+            # Alternate rows for dithered effect
+            offset = dot_spacing / 2 if int((current_y - start_y) / dot_spacing) % 2 else 0
+            current_x += offset
+            
+            while current_x < x + w:
+                # Only draw dot if it's within the panel bounds
+                if current_x >= x and current_x <= x + w and current_y >= y and current_y <= y + h:
+                    cr.arc(current_x, current_y, dot_size / 2, 0, 2 * 3.14159)
+                    cr.fill()
+                current_x += dot_spacing
+            current_y += dot_spacing
+    
+    def _draw_other_elements(self, cr, element, x, y, w, h):
+        """Draw non-panel elements (shapes, text, etc)."""
+        if element.type == ElementType.SHAPE:
             # Draw shapes
             shape_type = element.properties.get("shape_type", "rectangle")
             line_color = element.properties.get("line_color", "#000000")
@@ -464,30 +721,6 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             cr.set_source_rgb(0.5, 0.5, 0.5)
             cr.move_to(x + 5, y + 15)
             cr.show_text(element.properties.get("text", "Enter text here"))
-        
-        # Draw selection if selected
-        if element in self.selected_elements:
-            selection_color = self.config.get("selection_color", "#0066FF")
-            sel_r, sel_g, sel_b = self._hex_to_rgb(selection_color)
-            cr.set_source_rgb(sel_r, sel_g, sel_b)
-            cr.set_line_width(2)
-            cr.set_dash([5, 5])
-            cr.rectangle(x, y, w, h)
-            cr.stroke()
-            cr.set_dash([])
-            
-            # Draw resize handles
-            handle_size = 8
-            handles = [
-                (x - handle_size/2, y - handle_size/2),  # Top-left
-                (x + w - handle_size/2, y - handle_size/2),  # Top-right
-                (x - handle_size/2, y + h - handle_size/2),  # Bottom-left
-                (x + w - handle_size/2, y + h - handle_size/2),  # Bottom-right
-            ]
-            cr.set_source_rgb(sel_r, sel_g, sel_b)
-            for hx, hy in handles:
-                cr.rectangle(hx, hy, handle_size, handle_size)
-                cr.fill()
     
     def _hex_to_rgb(self, hex_color):
         """Convert hex color to RGB tuple (0-1 range)."""
@@ -659,12 +892,80 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         
         return False
     
-    def _on_canvas_drop(self, drop_target, value, x, y):
-        """Handle drop event on canvas."""
+    def _on_drop_accept(self, drop_target, drop):
+        """Check if we accept the drop."""
+        # Always accept drops to avoid GTK errors
+        return True
+    
+    def _on_canvas_drop_unified(self, drop_target, value, x, y):
+        """Handle unified drop event on canvas (both files and elements)."""
         if not self.current_page:
-            return False
+            return True  # Return True to avoid GTK errors
         
-        element_type = value
+        # Check if it's a file list or a string
+        if isinstance(value, Gdk.FileList):
+            return self._handle_file_drop(value, x, y)
+        elif isinstance(value, str):
+            return self._handle_element_drop(value, x, y)
+        
+        return True  # Always return True to avoid GTK errors
+    
+    def _handle_element_drop(self, element_type, x, y):
+        """Handle element drop (string type)."""
+        # Check if the string is actually a file path (starts with / or file://)
+        if element_type.startswith('/') or element_type.startswith('file://'):
+            # Strip file:// prefix if present and trim whitespace/newlines
+            file_path = element_type.replace('file://', '').strip()
+            
+            # Check if it's an image file
+            valid_extensions = ['.png', '.jpg', '.jpeg', '.gif', '.bmp']
+            if any(file_path.lower().endswith(ext) for ext in valid_extensions):
+                return self._handle_file_drop_from_path(file_path, x, y)
+        
+        # Otherwise, handle as element type
+        # Calculate position relative to page
+        scale = self.zoom_level / 100.0
+        page_width = self.current_page.width * scale
+        page_height = self.current_page.height * scale
+        canvas_width = self.canvas.get_width()
+        canvas_height = self.canvas.get_height()
+        
+        x_offset = max((canvas_width - page_width) / 2, 0)
+        y_offset = max((canvas_height - page_height) / 2, 0)
+        
+        # Convert canvas coordinates to page coordinates
+        page_x = (x - x_offset) / scale
+        page_y = (y - y_offset) / scale
+        
+        # Check if drop is within page bounds
+        if page_x < 0 or page_x > self.current_page.width or page_y < 0 or page_y > self.current_page.height:
+            return True  # Return True to avoid GTK errors
+        
+        # Create element based on type
+        element = self._create_element_from_type(element_type, page_x, page_y)
+        if element:
+            self.current_page.add_element(element)
+            self.canvas.queue_draw()
+        
+        return True  # Always return True to avoid GTK errors
+    
+    def _handle_file_drop(self, files, x, y):
+        """Handle file drop event on canvas (from Gdk.FileList)."""
+        if not files or len(files) == 0:
+            return True  # Return True to avoid GTK errors
+        
+        # Only handle the first file
+        file = files[0]
+        file_path = file.get_path()
+        
+        return self._handle_file_drop_from_path(file_path, x, y)
+    
+    def _handle_file_drop_from_path(self, file_path, x, y):
+        """Handle file drop given a file path string."""
+        # Check if it's an image file
+        valid_extensions = ['.png', '.jpg', '.jpeg', '.gif', '.bmp']
+        if not any(file_path.lower().endswith(ext) for ext in valid_extensions):
+            return True  # Return True to avoid GTK errors
         
         # Calculate position relative to page
         scale = self.zoom_level / 100.0
@@ -682,16 +983,102 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         
         # Check if drop is within page bounds
         if page_x < 0 or page_x > self.current_page.width or page_y < 0 or page_y > self.current_page.height:
-            return False
+            return True  # Return True to avoid GTK errors
         
-        # Create element based on type
-        element = self._create_element_from_type(element_type, page_x, page_y)
-        if element:
-            self.current_page.add_element(element)
-            self.canvas.queue_draw()
-            return True
+        # Copy image to project
+        from pathlib import Path
+        image_filename = self.project.copy_image_to_project(Path(file_path))
         
-        return False
+        # Check if dropped on an existing panel
+        target_panel = None
+        for element in reversed(self.current_page.elements):
+            if (element.type == ElementType.PANEL and
+                element.x <= page_x <= element.x + element.width and
+                element.y <= page_y <= element.y + element.height):
+                target_panel = element
+                break
+        
+        if target_panel:
+            # Add image to existing panel (replace if exists)
+            target_panel.properties["image"] = image_filename
+            
+            # Store the image's actual dimensions so it doesn't resize with the panel
+            from PIL import Image
+            image_path = self.project.images_dir / image_filename
+            if image_path.exists():
+                pil_image = Image.open(str(image_path))
+                img_width, img_height = pil_image.size
+                
+                # Scale to fit within panel while maintaining aspect ratio
+                panel_w = target_panel.width
+                panel_h = target_panel.height
+                scale_x = panel_w / img_width
+                scale_y = panel_h / img_height
+                scale_factor = min(scale_x, scale_y)
+                
+                scaled_width = img_width * scale_factor
+                scaled_height = img_height * scale_factor
+                
+                target_panel.properties["image_width"] = scaled_width
+                target_panel.properties["image_height"] = scaled_height
+                
+                # Store centered offset (relative to panel)
+                target_panel.properties["image_offset_x"] = (panel_w - scaled_width) / 2
+                target_panel.properties["image_offset_y"] = (panel_h - scaled_height) / 2
+        else:
+            # Create new panel with image at drop location (20% of page size)
+            width = self.current_page.width * 0.2
+            height = self.current_page.height * 0.2
+            
+            # Center panel at drop location
+            panel_x = page_x - width / 2
+            panel_y = page_y - height / 2
+            
+            # Constrain to page bounds
+            if panel_x < 0:
+                panel_x = 0
+            if panel_y < 0:
+                panel_y = 0
+            if panel_x + width > self.current_page.width:
+                panel_x = self.current_page.width - width
+            if panel_y + height > self.current_page.height:
+                panel_y = self.current_page.height - height
+            
+            panel = Element(
+                ElementType.PANEL,
+                panel_x, panel_y, width, height,
+                border_color=self.config.get("panel_border_color", "#000000"),
+                border_width=self.config.get("panel_border_width", 2),
+                background_color="#FFFFFF",
+                image=image_filename
+            )
+            
+            # Store the image's actual dimensions so it doesn't resize with the panel
+            from PIL import Image
+            image_path = self.project.images_dir / image_filename
+            if image_path.exists():
+                pil_image = Image.open(str(image_path))
+                img_width, img_height = pil_image.size
+                
+                # Scale to fit within panel while maintaining aspect ratio
+                scale_x = width / img_width
+                scale_y = height / img_height
+                scale_factor = min(scale_x, scale_y)
+                
+                scaled_width = img_width * scale_factor
+                scaled_height = img_height * scale_factor
+                
+                panel.properties["image_width"] = scaled_width
+                panel.properties["image_height"] = scaled_height
+                
+                # Store centered offset (relative to panel)
+                panel.properties["image_offset_x"] = (width - scaled_width) / 2
+                panel.properties["image_offset_y"] = (height - scaled_height) / 2
+            
+            self.current_page.add_element(panel)
+        
+        self.canvas.queue_draw()
+        return True
     
     def _create_element_from_type(self, element_type, x, y):
         """Create an element from a type string."""
@@ -771,10 +1158,61 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         
         # Update selection
         if clicked_element:
-            self.selected_elements = [clicked_element]
+            # Check if clicking on a resize handle - if so, don't toggle selection mode
+            if clicked_element in self.selected_elements:
+                handle_size = 8 / scale
+                
+                # Check panel resize handles
+                if self.selection_mode == 'panel':
+                    handles = [
+                        (clicked_element.x, clicked_element.y),
+                        (clicked_element.x + clicked_element.width, clicked_element.y),
+                        (clicked_element.x, clicked_element.y + clicked_element.height),
+                        (clicked_element.x + clicked_element.width, clicked_element.y + clicked_element.height),
+                    ]
+                    on_handle = any(hx - handle_size <= page_x <= hx + handle_size and
+                                   hy - handle_size <= page_y <= hy + handle_size
+                                   for hx, hy in handles)
+                    
+                    if not on_handle:
+                        # Not on a handle, check if we should toggle to image mode
+                        if (clicked_element.type == ElementType.PANEL and
+                            clicked_element.properties.get("image")):
+                            self.selection_mode = 'image'
+                elif self.selection_mode == 'image':
+                    # Check image resize handles
+                    w = clicked_element.width
+                    h = clicked_element.height
+                    image_width = clicked_element.properties.get("image_width", int(w))
+                    image_height = clicked_element.properties.get("image_height", int(h))
+                    offset_x = clicked_element.properties.get("image_offset_x", (w - image_width) / 2)
+                    offset_y = clicked_element.properties.get("image_offset_y", (h - image_height) / 2)
+                    
+                    img_x = clicked_element.x + offset_x
+                    img_y = clicked_element.y + offset_y
+                    
+                    handles = [
+                        (img_x, img_y),
+                        (img_x + image_width, img_y),
+                        (img_x, img_y + image_height),
+                        (img_x + image_width, img_y + image_height),
+                    ]
+                    on_handle = any(hx - handle_size <= page_x <= hx + handle_size and
+                                   hy - handle_size <= page_y <= hy + handle_size
+                                   for hx, hy in handles)
+                    
+                    if not on_handle:
+                        # Not on a handle, toggle back to panel mode
+                        self.selection_mode = 'panel'
+            else:
+                # New selection - start with panel mode
+                self.selected_elements = [clicked_element]
+                self.selection_mode = 'panel'
         else:
             self.selected_elements = []
+            self.selection_mode = 'panel'
         
+        self._update_layer_buttons()
         self.canvas.queue_draw()
     
     def _on_drag_begin(self, gesture, start_x, start_y):
@@ -798,36 +1236,90 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         page_x = (start_x - x_offset) / scale
         page_y = (start_y - y_offset) / scale
         
-        # Check if clicking on a resize handle
-        handle_size = 8 / scale
-        handles = {
-            'top-left': (element.x, element.y),
-            'top-right': (element.x + element.width, element.y),
-            'bottom-left': (element.x, element.y + element.height),
-            'bottom-right': (element.x + element.width, element.y + element.height),
-        }
-        
-        for handle_name, (hx, hy) in handles.items():
-            if (hx - handle_size <= page_x <= hx + handle_size and
-                hy - handle_size <= page_y <= hy + handle_size):
-                self.resizing_element = element
-                self.resize_handle = handle_name
+        # Handle based on selection mode
+        if self.selection_mode == 'image' and element.type == ElementType.PANEL and element.properties.get("image"):
+            # Image selection mode - work with image bounds
+            w = element.width
+            h = element.height
+            image_filename = element.properties.get("image")
+            image_width = element.properties.get("image_width", int(w))
+            image_height = element.properties.get("image_height", int(h))
+            
+            # Get stored offset
+            offset_x = element.properties.get("image_offset_x", (w - image_width) / 2)
+            offset_y = element.properties.get("image_offset_y", (h - image_height) / 2)
+            
+            surface = self._get_cached_image_surface(image_filename, int(image_width), int(image_height))
+            
+            if surface:
+                surface_width = surface.get_width()
+                surface_height = surface.get_height()
+                img_x = element.x + offset_x
+                img_y = element.y + offset_y
+                
+                # Check if clicking on image resize handles
+                handle_size = 8 / scale
+                handles = {
+                    'top-left': (img_x, img_y),
+                    'top-right': (img_x + surface_width, img_y),
+                    'bottom-left': (img_x, img_y + surface_height),
+                    'bottom-right': (img_x + surface_width, img_y + surface_height),
+                }
+                
+                for handle_name, (hx, hy) in handles.items():
+                    if (hx - handle_size <= page_x <= hx + handle_size and
+                        hy - handle_size <= page_y <= hy + handle_size):
+                        # Store image properties for resizing
+                        if "image_width" not in element.properties:
+                            element.properties["image_width"] = surface_width
+                        if "image_height" not in element.properties:
+                            element.properties["image_height"] = surface_height
+                        
+                        self.resizing_element = element
+                        self.resizing_image = True
+                        self.resize_handle = handle_name
+                        self.drag_start_x = page_x
+                        self.drag_start_y = page_y
+                        self.element_start_width = element.properties.get("image_width", surface_width)
+                        self.element_start_height = element.properties.get("image_height", surface_height)
+                        # Initialize temp dimensions
+                        self.temp_image_width = self.element_start_width
+                        self.temp_image_height = self.element_start_height
+                        return
+        else:
+            # Panel selection mode - work with panel bounds
+            # Check if clicking on a resize handle
+            handle_size = 8 / scale
+            handles = {
+                'top-left': (element.x, element.y),
+                'top-right': (element.x + element.width, element.y),
+                'bottom-left': (element.x, element.y + element.height),
+                'bottom-right': (element.x + element.width, element.y + element.height),
+            }
+            
+            for handle_name, (hx, hy) in handles.items():
+                if (hx - handle_size <= page_x <= hx + handle_size and
+                    hy - handle_size <= page_y <= hy + handle_size):
+                    self.resizing_element = element
+                    self.resizing_image = False
+                    self.resize_handle = handle_name
+                    self.drag_start_x = page_x
+                    self.drag_start_y = page_y
+                    self.element_start_x = element.x
+                    self.element_start_y = element.y
+                    self.element_start_width = element.width
+                    self.element_start_height = element.height
+                    return
+            
+            # If not on a handle, start dragging the element
+            if (element.x <= page_x <= element.x + element.width and
+                element.y <= page_y <= element.y + element.height):
+                self.dragging_element = element
+                self.dragging_image = False
                 self.drag_start_x = page_x
                 self.drag_start_y = page_y
                 self.element_start_x = element.x
                 self.element_start_y = element.y
-                self.element_start_width = element.width
-                self.element_start_height = element.height
-                return
-        
-        # If not on a handle, start dragging the element
-        if (element.x <= page_x <= element.x + element.width and
-            element.y <= page_y <= element.y + element.height):
-            self.dragging_element = element
-            self.drag_start_x = page_x
-            self.drag_start_y = page_y
-            self.element_start_x = element.x
-            self.element_start_y = element.y
     
     def _on_drag_update(self, gesture, offset_x, offset_y):
         """Handle drag update for moving/resizing elements."""
@@ -855,56 +1347,138 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             self.canvas.queue_draw()
         
         elif self.resizing_element:
-            # Resize the element based on which handle is being dragged
             element = self.resizing_element
             
-            if self.resize_handle == 'top-left':
-                new_x = self.element_start_x + dx
-                new_y = self.element_start_y + dy
-                new_width = self.element_start_width - dx
-                new_height = self.element_start_height - dy
+            if self.resizing_image:
+                # Resizing the image inside a panel - maintain aspect ratio
+                # Calculate the aspect ratio from the original image size
+                aspect_ratio = self.element_start_width / self.element_start_height
                 
-                if new_width > 20 and new_height > 20:
-                    element.x = new_x
-                    element.y = new_y
-                    element.width = new_width
-                    element.height = new_height
-            
-            elif self.resize_handle == 'top-right':
-                new_y = self.element_start_y + dy
-                new_width = self.element_start_width + dx
-                new_height = self.element_start_height - dy
+                # Determine new size based on the handle being dragged
+                if self.resize_handle in ['top-right', 'bottom-right']:
+                    # Right side handles - use width change
+                    new_width = self.element_start_width + dx
+                    new_height = new_width / aspect_ratio
+                elif self.resize_handle in ['top-left', 'bottom-left']:
+                    # Left side handles - use width change (inverted)
+                    new_width = self.element_start_width - dx
+                    new_height = new_width / aspect_ratio
+                else:
+                    new_width = self.element_start_width
+                    new_height = self.element_start_height
                 
+                # Enforce minimum size and update temp dimensions only
                 if new_width > 20 and new_height > 20:
-                    element.y = new_y
-                    element.width = new_width
-                    element.height = new_height
-            
-            elif self.resize_handle == 'bottom-left':
-                new_x = self.element_start_x + dx
-                new_width = self.element_start_width - dx
-                new_height = self.element_start_height + dy
+                    self.temp_image_width = new_width
+                    self.temp_image_height = new_height
                 
-                if new_width > 20 and new_height > 20:
-                    element.x = new_x
-                    element.width = new_width
-                    element.height = new_height
-            
-            elif self.resize_handle == 'bottom-right':
-                new_width = self.element_start_width + dx
-                new_height = self.element_start_height + dy
+                self.canvas.queue_draw()
+            else:
+                # Resizing the panel itself
+                if self.resize_handle == 'top-left':
+                    new_x = self.element_start_x + dx
+                    new_y = self.element_start_y + dy
+                    new_width = self.element_start_width - dx
+                    new_height = self.element_start_height - dy
+                    
+                    if new_width > 20 and new_height > 20:
+                        element.x = new_x
+                        element.y = new_y
+                        element.width = new_width
+                        element.height = new_height
                 
-                if new_width > 20 and new_height > 20:
-                    element.width = new_width
-                    element.height = new_height
-            
-            self.canvas.queue_draw()
+                elif self.resize_handle == 'top-right':
+                    new_y = self.element_start_y + dy
+                    new_width = self.element_start_width + dx
+                    new_height = self.element_start_height - dy
+                    
+                    if new_width > 20 and new_height > 20:
+                        element.y = new_y
+                        element.width = new_width
+                        element.height = new_height
+                
+                elif self.resize_handle == 'bottom-left':
+                    new_x = self.element_start_x + dx
+                    new_width = self.element_start_width - dx
+                    new_height = self.element_start_height + dy
+                    
+                    if new_width > 20 and new_height > 20:
+                        element.x = new_x
+                        element.width = new_width
+                        element.height = new_height
+                
+                elif self.resize_handle == 'bottom-right':
+                    new_width = self.element_start_width + dx
+                    new_height = self.element_start_height + dy
+                    
+                    if new_width > 20 and new_height > 20:
+                        element.width = new_width
+                        element.height = new_height
+                
+                self.canvas.queue_draw()
     
     def _on_drag_end(self, gesture, offset_x, offset_y):
         """Handle drag end."""
+        # If we were resizing an image, apply the final dimensions and clear cache
+        if self.resizing_image and self.resizing_element:
+            element = self.resizing_element
+            image_filename = element.properties.get("image")
+            
+            # Clear old cache entries for this image
+            keys_to_remove = [k for k in self.image_cache.keys() if k[0] == image_filename]
+            for key in keys_to_remove:
+                del self.image_cache[key]
+            
+            # Apply the final dimensions
+            element.properties["image_width"] = self.temp_image_width
+            element.properties["image_height"] = self.temp_image_height
+            
+            # Trigger a redraw to load the image at the new size
+            self.canvas.queue_draw()
+        
         self.dragging_element = None
+        self.dragging_image = False
         self.resizing_element = None
+        self.resizing_image = False
         self.resize_handle = None
+        self.temp_image_width = 0
+        self.temp_image_height = 0
+    
+    def _on_bring_to_front(self, button):
+        """Bring selected element to front."""
+        if self.selected_elements and self.current_page:
+            self.current_page.bring_to_front(self.selected_elements[0])
+            self._update_layer_buttons()
+            self.canvas.queue_draw()
+    
+    def _on_bring_forward(self, button):
+        """Bring selected element forward one layer."""
+        if self.selected_elements and self.current_page:
+            self.current_page.bring_forward(self.selected_elements[0])
+            self._update_layer_buttons()
+            self.canvas.queue_draw()
+    
+    def _on_send_backward(self, button):
+        """Send selected element backward one layer."""
+        if self.selected_elements and self.current_page:
+            self.current_page.send_backward(self.selected_elements[0])
+            self._update_layer_buttons()
+            self.canvas.queue_draw()
+    
+    def _on_send_to_back(self, button):
+        """Send selected element to back."""
+        if self.selected_elements and self.current_page:
+            self.current_page.send_to_back(self.selected_elements[0])
+            self._update_layer_buttons()
+            self.canvas.queue_draw()
+    
+    def _update_layer_buttons(self):
+        """Enable/disable layer buttons based on selection."""
+        has_selection = len(self.selected_elements) > 0
+        self.bring_front_btn.set_sensitive(has_selection)
+        self.bring_forward_btn.set_sensitive(has_selection)
+        self.send_backward_btn.set_sensitive(has_selection)
+        self.send_back_btn.set_sensitive(has_selection)
     
     def _on_close_request(self, window):
         """Handle window close request."""
