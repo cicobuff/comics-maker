@@ -305,6 +305,11 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         gesture_drag.connect("drag-end", self._on_drag_end)
         self.canvas.add_controller(gesture_drag)
         
+        # Add motion controller for cursor changes
+        motion_controller = Gtk.EventControllerMotion.new()
+        motion_controller.connect("motion", self._on_canvas_motion)
+        self.canvas.add_controller(motion_controller)
+        
         scrolled.set_child(self.canvas)
         
         return scrolled
@@ -1517,6 +1522,93 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         self.temp_image_height = 0
         self.image_start_offset_x = 0
         self.image_start_offset_y = 0
+    
+    def _on_canvas_motion(self, controller, x, y):
+        """Handle mouse motion for cursor changes."""
+        if not self.current_page:
+            self.canvas.set_cursor(None)  # Default cursor
+            return
+        
+        # Calculate position relative to page
+        scale = self.zoom_level / 100.0
+        page_width = self.current_page.width * scale
+        page_height = self.current_page.height * scale
+        canvas_width = self.canvas.get_width()
+        canvas_height = self.canvas.get_height()
+        
+        x_offset = max((canvas_width - page_width) / 2, 0)
+        y_offset = max((canvas_height - page_height) / 2, 0)
+        
+        # Convert canvas coordinates to page coordinates
+        page_x = (x - x_offset) / scale
+        page_y = (y - y_offset) / scale
+        
+        handle_size = 8 / scale
+        
+        # Check if hovering over selected element
+        if self.selected_elements:
+            element = self.selected_elements[0]
+            
+            if self.selection_mode == 'image' and element.type == ElementType.PANEL and element.properties.get("image"):
+                # Image mode - check image handles and body
+                w = element.width
+                h = element.height
+                image_width = element.properties.get("image_width", w)
+                image_height = element.properties.get("image_height", h)
+                offset_x = element.properties.get("image_offset_x", (w - image_width) / 2)
+                offset_y = element.properties.get("image_offset_y", (h - image_height) / 2)
+                
+                img_x = element.x + offset_x
+                img_y = element.y + offset_y
+                
+                # Check if on image resize handles
+                handles = {
+                    'nw-resize': (img_x, img_y),
+                    'ne-resize': (img_x + image_width, img_y),
+                    'sw-resize': (img_x, img_y + image_height),
+                    'se-resize': (img_x + image_width, img_y + image_height),
+                }
+                
+                for cursor_name, (hx, hy) in handles.items():
+                    if (hx - handle_size <= page_x <= hx + handle_size and
+                        hy - handle_size <= page_y <= hy + handle_size):
+                        # On image resize handle - use resize cursor
+                        self.canvas.set_cursor(Gdk.Cursor.new_from_name(cursor_name, None))
+                        return
+                
+                # Check if on image body
+                if (img_x <= page_x <= img_x + image_width and
+                    img_y <= page_y <= img_y + image_height):
+                    # On image body - use move cursor
+                    self.canvas.set_cursor(Gdk.Cursor.new_from_name("move", None))
+                    return
+                    
+            elif self.selection_mode == 'panel':
+                # Panel mode - check panel handles and body
+                # Check if on panel resize handles
+                handles = {
+                    'nw-resize': (element.x, element.y),
+                    'ne-resize': (element.x + element.width, element.y),
+                    'sw-resize': (element.x, element.y + element.height),
+                    'se-resize': (element.x + element.width, element.y + element.height),
+                }
+                
+                for cursor_name, (hx, hy) in handles.items():
+                    if (hx - handle_size <= page_x <= hx + handle_size and
+                        hy - handle_size <= page_y <= hy + handle_size):
+                        # On panel resize handle - use resize cursor
+                        self.canvas.set_cursor(Gdk.Cursor.new_from_name(cursor_name, None))
+                        return
+                
+                # Check if on panel body
+                if (element.x <= page_x <= element.x + element.width and
+                    element.y <= page_y <= element.y + element.height):
+                    # On panel body - use move cursor
+                    self.canvas.set_cursor(Gdk.Cursor.new_from_name("move", None))
+                    return
+        
+        # Default cursor
+        self.canvas.set_cursor(None)
     
     def _on_bring_to_front(self, button):
         """Bring selected element to front."""
