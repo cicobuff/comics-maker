@@ -1,0 +1,15 @@
+{
+  "name": "Thought Bubble",
+  "type": "thought_bubble",
+  "default_width": 200,
+  "default_height": 100,
+  "line_color": "#000000",
+  "line_weight": 2,
+  "background_color": "#FFFFFF",
+  "text_offset_x": 10,
+  "text_offset_y": 10,
+  "text_color": "#000000",
+  "text_size": 14,
+  "font": "Arial",
+  "bubble_count": 3
+}

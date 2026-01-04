@@ -1,0 +1,10 @@
+{
+  "name": "Square",
+  "type": "square",
+  "default_width": 150,
+  "default_height": 150,
+  "line_color": "#000000",
+  "line_weight": 2,
+  "background_color": "#FFFFFF",
+  "fill_type": "solid"
+}
