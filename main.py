@@ -60,7 +60,7 @@ class ComicsMakerApp(Gtk.Application):
     
     def _on_project_selected(self, project):
         """Handle project selection."""
-        workspace = WorkspaceWindow(self, project, self.config)
+        workspace = WorkspaceWindow(self, project, self.config, self._show_projects_screen)
         self.workspace_windows.append(workspace)
         workspace.present()
 

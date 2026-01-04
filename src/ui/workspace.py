@@ -8,14 +8,16 @@ from ..core.undo_manager import UndoManager
 class WorkspaceWindow(Gtk.ApplicationWindow):
     """Main project workspace window."""
     
-    def __init__(self, application, project: Project, config):
+    def __init__(self, application, project: Project, config, show_projects_callback=None):
         super().__init__(application=application)
         self.project = project
         self.config = config
+        self.show_projects_callback = show_projects_callback
         self.undo_manager = UndoManager(config.get("undo_limit", 999))
         self.current_page = None
         self.selected_elements = []
         self.zoom_level = 100
+        self.grid_visible = False
         
         self.set_title(f"Comics Maker - {project.name}")
         self.set_default_size(1400, 900)
@@ -94,15 +96,22 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
     def _create_actions(self):
         """Create window actions."""
         actions = {
+            "new_project": self._on_new_project,
+            "open_project": self._on_open_project,
             "save": self._on_save,
             "save_as": self._on_save_as,
             "export": self._on_export,
+            "settings": self._on_settings,
+            "quit": self._on_quit,
             "undo": self._on_undo,
             "redo": self._on_redo,
             "copy": self._on_copy,
             "paste": self._on_paste,
             "zoom_in": self._on_zoom_in,
             "zoom_out": self._on_zoom_out,
+            "full_page": self._on_full_page,
+            "page_width": self._on_page_width,
+            "toggle_grid": self._on_toggle_grid,
         }
         
         for name, callback in actions.items():
@@ -321,6 +330,16 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 self.current_page = self.project.pages[0]
                 self.canvas.queue_draw()
     
+    def _on_new_project(self, action, param):
+        """Create new project - show projects screen."""
+        if self.show_projects_callback:
+            self.show_projects_callback()
+    
+    def _on_open_project(self, action, param):
+        """Open project - show projects screen."""
+        if self.show_projects_callback:
+            self.show_projects_callback()
+    
     def _on_save(self, action, param):
         """Save project."""
         self.project.save()
@@ -332,6 +351,14 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
     def _on_export(self, action, param):
         """Export project."""
         pass
+    
+    def _on_settings(self, action, param):
+        """Open settings dialog."""
+        pass
+    
+    def _on_quit(self, action, param):
+        """Quit application."""
+        self.get_application().quit()
     
     def _on_undo(self, action, param):
         """Undo last action."""
@@ -363,4 +390,28 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         min_zoom = self.config.get("min_zoom", 10)
         self.zoom_level = max(self.zoom_level - self.config.get("scroll_zoom_step", 10), min_zoom)
         self.zoom_label.set_text(f"{self.zoom_level}%")
+        self.canvas.queue_draw()
+    
+    def _on_full_page(self, action, param):
+        """Zoom to fit full page."""
+        if self.current_page:
+            canvas_width = self.canvas.get_width()
+            canvas_height = self.canvas.get_height()
+            zoom_w = (canvas_width / self.current_page.width) * 100
+            zoom_h = (canvas_height / self.current_page.height) * 100
+            self.zoom_level = min(zoom_w, zoom_h) * 0.9
+            self.zoom_label.set_text(f"{int(self.zoom_level)}%")
+            self.canvas.queue_draw()
+    
+    def _on_page_width(self, action, param):
+        """Zoom to fit page width."""
+        if self.current_page:
+            canvas_width = self.canvas.get_width()
+            self.zoom_level = (canvas_width / self.current_page.width) * 100 * 0.9
+            self.zoom_label.set_text(f"{int(self.zoom_level)}%")
+            self.canvas.queue_draw()
+    
+    def _on_toggle_grid(self, action, param):
+        """Toggle grid visibility."""
+        self.grid_visible = not self.grid_visible
         self.canvas.queue_draw()
