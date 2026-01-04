@@ -57,6 +57,8 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         
         if self.project.pages:
             self.current_page = self.project.pages[0]
+            # Refresh pages list to select the current page
+            self._refresh_pages_list()
     
     def _build_ui(self):
         """Build the workspace UI."""
@@ -253,9 +255,9 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         dup_btn.connect("clicked", self._on_duplicate_page)
         btn_box.append(dup_btn)
         
-        del_btn = Gtk.Button(label="Delete")
-        del_btn.connect("clicked", self._on_delete_page)
-        btn_box.append(del_btn)
+        self.del_page_btn = Gtk.Button(label="Delete")
+        self.del_page_btn.connect("clicked", self._on_delete_page)
+        btn_box.append(self.del_page_btn)
         
         box.append(btn_box)
         
@@ -442,45 +444,54 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                         pil_image = Image.open(str(image_path))
                         img_width, img_height = pil_image.size
                         
-                        # Scale to fit within current panel while maintaining aspect ratio
-                        scale_x = w / img_width
-                        scale_y = h / img_height
+                        # Scale to fit within panel while maintaining aspect ratio
+                        # Use unscaled panel dimensions for calculations
+                        panel_w = element.width
+                        panel_h = element.height
+                        scale_x = panel_w / img_width
+                        scale_y = panel_h / img_height
                         scale_factor = min(scale_x, scale_y)
                         
+                        # Store in page coordinates (unscaled)
                         element.properties["image_width"] = img_width * scale_factor
                         element.properties["image_height"] = img_height * scale_factor
                         
-                        # Store initial centered offset (relative to panel)
-                        element.properties["image_offset_x"] = (w - img_width * scale_factor) / 2
-                        element.properties["image_offset_y"] = (h - img_height * scale_factor) / 2
+                        # Store initial centered offset (relative to panel, in page coordinates)
+                        element.properties["image_offset_x"] = (panel_w - img_width * scale_factor) / 2
+                        element.properties["image_offset_y"] = (panel_h - img_height * scale_factor) / 2
                 
-                # Use stored image dimensions
-                image_width = element.properties.get("image_width", int(w))
-                image_height = element.properties.get("image_height", int(h))
+                # Use stored image dimensions (in page coordinates)
+                stored_image_width = element.properties.get("image_width", element.width)
+                stored_image_height = element.properties.get("image_height", element.height)
                 
-                # Use stored offset, or default to centered
-                offset_x = element.properties.get("image_offset_x", (w - image_width) / 2)
-                offset_y = element.properties.get("image_offset_y", (h - image_height) / 2)
+                # Use stored offset (in page coordinates)
+                stored_offset_x = element.properties.get("image_offset_x", (element.width - stored_image_width) / 2)
+                stored_offset_y = element.properties.get("image_offset_y", (element.height - stored_image_height) / 2)
                 
-                # Draw the image with caching
-                surface = self._get_cached_image_surface(image_filename, int(image_width), int(image_height))
+                # Calculate scaled positions
+                img_x = x + stored_offset_x * scale
+                img_y = y + stored_offset_y * scale
+                display_width = stored_image_width * scale
+                display_height = stored_image_height * scale
+                
+                # Get cached surface at original size (not scaled by zoom)
+                surface = self._get_cached_image_surface(image_filename, int(stored_image_width), int(stored_image_height))
                 
                 if surface:
-                    # The surface is already the correct size
-                    surface_width = surface.get_width()
-                    surface_height = surface.get_height()
-                    
-                    # Position image using stored offset (anchored to top-left of panel)
-                    img_x = x + offset_x
-                    img_y = y + offset_y
-                    
                     # Draw the image with clipping to panel bounds
                     cr.save()
                     # Set clipping region to panel boundaries
                     cr.rectangle(x, y, w, h)
                     cr.clip()
-                    # Draw the image
+                    
+                    # Position and scale the image
                     cr.translate(img_x, img_y)
+                    # Scale to desired display size
+                    if surface.get_width() > 0 and surface.get_height() > 0:
+                        scale_x = display_width / surface.get_width()
+                        scale_y = display_height / surface.get_height()
+                        cr.scale(scale_x, scale_y)
+                    
                     cr.set_source_surface(surface, 0, 0)
                     cr.paint()
                     cr.restore()
@@ -488,8 +499,10 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                     # If currently resizing this image, draw a preview rectangle at the new size
                     if (self.resizing_image and self.resizing_element == element and 
                         element in self.selected_elements and self.selection_mode == 'image'):
-                        preview_x = x + offset_x
-                        preview_y = y + offset_y
+                        preview_x = img_x
+                        preview_y = img_y
+                        preview_width = self.temp_image_width * scale
+                        preview_height = self.temp_image_height * scale
                         
                         # Clip to panel boundaries for preview as well
                         cr.save()
@@ -498,13 +511,13 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                         
                         # Draw semi-transparent overlay
                         cr.set_source_rgba(1.0, 0.0, 0.0, 0.2)  # Red with transparency
-                        cr.rectangle(preview_x, preview_y, self.temp_image_width, self.temp_image_height)
+                        cr.rectangle(preview_x, preview_y, preview_width, preview_height)
                         cr.fill()
                         
                         # Draw solid outline
                         cr.set_source_rgb(1.0, 0.0, 0.0)  # Red
                         cr.set_line_width(3)
-                        cr.rectangle(preview_x, preview_y, self.temp_image_width, self.temp_image_height)
+                        cr.rectangle(preview_x, preview_y, preview_width, preview_height)
                         cr.stroke()
                         
                         cr.restore()
@@ -554,29 +567,24 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             
             elif self.selection_mode == 'image' and element.type == ElementType.PANEL and element.properties.get("image"):
                 # Image selection - red solid line around the actual image
-                image_filename = element.properties.get("image")
-                image_width = element.properties.get("image_width", int(w))
-                image_height = element.properties.get("image_height", int(h))
+                stored_image_width = element.properties.get("image_width", element.width)
+                stored_image_height = element.properties.get("image_height", element.height)
                 
                 # Get stored offset
-                offset_x = element.properties.get("image_offset_x", (w - image_width) / 2)
-                offset_y = element.properties.get("image_offset_y", (h - image_height) / 2)
+                stored_offset_x = element.properties.get("image_offset_x", (element.width - stored_image_width) / 2)
+                stored_offset_y = element.properties.get("image_offset_y", (element.height - stored_image_height) / 2)
                 
-                # Use temporary dimensions if currently resizing
+                # Calculate scaled display dimensions
                 if self.resizing_image and self.resizing_element == element:
-                    display_width = self.temp_image_width
-                    display_height = self.temp_image_height
+                    # Use temporary dimensions during resize
+                    display_width = self.temp_image_width * scale
+                    display_height = self.temp_image_height * scale
                 else:
-                    surface = self._get_cached_image_surface(image_filename, int(image_width), int(image_height))
-                    if surface:
-                        display_width = surface.get_width()
-                        display_height = surface.get_height()
-                    else:
-                        display_width = image_width
-                        display_height = image_height
+                    display_width = stored_image_width * scale
+                    display_height = stored_image_height * scale
                 
-                img_x = x + offset_x
-                img_y = y + offset_y
+                img_x = x + stored_offset_x * scale
+                img_y = y + stored_offset_y * scale
                 
                 # Red solid line for image
                 cr.set_source_rgb(1.0, 0.0, 0.0)  # Red
@@ -763,6 +771,13 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             row.set_child(label)
             row.page = page
             self.pages_list.append(row)
+            
+            # Select the row if it's the current page
+            if self.current_page and page == self.current_page:
+                self.pages_list.select_row(row)
+        
+        # Disable delete button if only one page
+        self.del_page_btn.set_sensitive(len(self.project.pages) > 1)
     
     def _on_page_selected(self, list_box, row):
         """Handle page selection."""
@@ -772,24 +787,35 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
     
     def _on_add_page(self, button):
         """Add a new page."""
-        self.project.add_page()
+        new_page = self.project.add_page()
+        self.current_page = new_page
         self._refresh_pages_list()
+        self.canvas.queue_draw()
     
     def _on_duplicate_page(self, button):
         """Duplicate selected page."""
         selected = self.pages_list.get_selected_row()
         if selected:
-            self.project.duplicate_page(selected.page)
+            new_page = self.project.duplicate_page(selected.page)
+            self.current_page = new_page
             self._refresh_pages_list()
+            self.canvas.queue_draw()
     
     def _on_delete_page(self, button):
         """Delete selected page."""
         selected = self.pages_list.get_selected_row()
         if selected and len(self.project.pages) > 1:
+            # Get the index of the page being deleted
+            page_index = self.project.pages.index(selected.page)
             self.project.remove_page(selected.page)
-            self._refresh_pages_list()
+            
+            # Select the previous page, or the first page if we deleted the first one
             if self.project.pages:
-                self.current_page = self.project.pages[0]
+                if page_index > 0:
+                    self.current_page = self.project.pages[page_index - 1]
+                else:
+                    self.current_page = self.project.pages[0]
+                self._refresh_pages_list()
                 self.canvas.queue_draw()
     
     def _on_new_project(self, action, param):
