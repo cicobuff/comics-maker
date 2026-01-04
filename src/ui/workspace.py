@@ -1064,11 +1064,10 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         scale = self.zoom_level / 100.0
         page_width = self.current_page.width * scale
         page_height = self.current_page.height * scale
-        canvas_width = self.canvas.get_width()
-        canvas_height = self.canvas.get_height()
-        
-        x_offset = max((canvas_width - page_width) / 2, 0)
-        y_offset = max((canvas_height - page_height) / 2, 0)
+        # Use padding + pan_offset for coordinate transformation (same as draw function)
+        padding = 100
+        x_offset = padding + self.pan_offset_x
+        y_offset = padding + self.pan_offset_y
         
         # Convert canvas coordinates to page coordinates
         page_x = (x - x_offset) / scale
@@ -1108,11 +1107,10 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         scale = self.zoom_level / 100.0
         page_width = self.current_page.width * scale
         page_height = self.current_page.height * scale
-        canvas_width = self.canvas.get_width()
-        canvas_height = self.canvas.get_height()
-        
-        x_offset = max((canvas_width - page_width) / 2, 0)
-        y_offset = max((canvas_height - page_height) / 2, 0)
+        # Use padding + pan_offset for coordinate transformation (same as draw function)
+        padding = 100
+        x_offset = padding + self.pan_offset_x
+        y_offset = padding + self.pan_offset_y
         
         # Convert canvas coordinates to page coordinates
         page_x = (x - x_offset) / scale
@@ -1275,11 +1273,10 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         scale = self.zoom_level / 100.0
         page_width = self.current_page.width * scale
         page_height = self.current_page.height * scale
-        canvas_width = self.canvas.get_width()
-        canvas_height = self.canvas.get_height()
-        
-        x_offset = max((canvas_width - page_width) / 2, 0)
-        y_offset = max((canvas_height - page_height) / 2, 0)
+        # Use padding + pan_offset for coordinate transformation (same as draw function)
+        padding = 100
+        x_offset = padding + self.pan_offset_x
+        y_offset = padding + self.pan_offset_y
         
         # Convert canvas coordinates to page coordinates
         page_x = (x - x_offset) / scale
@@ -1383,13 +1380,11 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         
         # Calculate position relative to page
         scale = self.zoom_level / 100.0
-        page_width = self.current_page.width * scale
-        page_height = self.current_page.height * scale
-        canvas_width = self.canvas.get_width()
-        canvas_height = self.canvas.get_height()
         
-        x_offset = max((canvas_width - page_width) / 2, 0)
-        y_offset = max((canvas_height - page_height) / 2, 0)
+        # Use padding + pan_offset for coordinate transformation (same as draw function)
+        padding = 100
+        x_offset = padding + self.pan_offset_x
+        y_offset = padding + self.pan_offset_y
         
         # Convert canvas coordinates to page coordinates
         page_x = (start_x - x_offset) / scale
@@ -1662,11 +1657,10 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         scale = self.zoom_level / 100.0
         page_width = self.current_page.width * scale
         page_height = self.current_page.height * scale
-        canvas_width = self.canvas.get_width()
-        canvas_height = self.canvas.get_height()
-        
-        x_offset = max((canvas_width - page_width) / 2, 0)
-        y_offset = max((canvas_height - page_height) / 2, 0)
+        # Use padding + pan_offset for coordinate transformation (same as draw function)
+        padding = 100
+        x_offset = padding + self.pan_offset_x
+        y_offset = padding + self.pan_offset_y
         
         # Convert canvas coordinates to page coordinates
         page_x = (x - x_offset) / scale
