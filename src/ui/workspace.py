@@ -118,6 +118,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         view_menu.append("Zoom Out", "win.zoom_out")
         view_menu.append("Full Page", "win.full_page")
         view_menu.append("Page Width", "win.page_width")
+        view_menu.append("Center Page", "win.center_page")
         view_menu.append("Toggle Grid", "win.toggle_grid")
         menu_model.append_submenu("View", view_menu)
         
@@ -144,6 +145,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             "zoom_out": self._on_zoom_out,
             "full_page": self._on_full_page,
             "page_width": self._on_page_width,
+            "center_page": self._on_center_page,
             "toggle_grid": self._on_toggle_grid,
         }
         
@@ -187,6 +189,10 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         zoom_in_btn = Gtk.Button(label="+")
         zoom_in_btn.connect("clicked", lambda b: self._on_zoom_in(None, None))
         toolbar.append(zoom_in_btn)
+        
+        center_page_btn = Gtk.Button(label="Center Page")
+        center_page_btn.connect("clicked", lambda b: self._on_center_page(None, None))
+        toolbar.append(center_page_btn)
         
         toolbar.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
         
@@ -267,9 +273,9 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
     
     def _create_work_area(self):
         """Create the center work area."""
-        scrolled = Gtk.ScrolledWindow()
-        scrolled.set_hexpand(True)
-        scrolled.set_vexpand(True)
+        self.scrolled = Gtk.ScrolledWindow()
+        self.scrolled.set_hexpand(True)
+        self.scrolled.set_vexpand(True)
         
         self.canvas = Gtk.DrawingArea()
         self.canvas.set_draw_func(self._draw_canvas)
@@ -312,9 +318,9 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         motion_controller.connect("motion", self._on_canvas_motion)
         self.canvas.add_controller(motion_controller)
         
-        scrolled.set_child(self.canvas)
+        self.scrolled.set_child(self.canvas)
         
-        return scrolled
+        return self.scrolled
     
     def _create_right_panel(self):
         """Create the right elements panel."""
@@ -898,6 +904,57 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             self.zoom_level = (canvas_width / self.current_page.width) * 100 * 0.9
             self.zoom_label.set_text(f"{int(self.zoom_level)}%")
             self.canvas.queue_draw()
+    
+    def _on_center_page(self, action, param):
+        """Center the page in the work area."""
+        if not self.current_page:
+            return
+        
+        # Update canvas size to match page at current zoom with padding
+        scale = self.zoom_level / 100.0
+        page_width = self.current_page.width * scale
+        page_height = self.current_page.height * scale
+        
+        # Add padding around the page for better visibility
+        padding = 100
+        canvas_width = page_width + padding * 2
+        canvas_height = page_height + padding * 2
+        
+        # Set canvas size to enable scrolling
+        self.canvas.set_size_request(int(canvas_width), int(canvas_height))
+        
+        # Force a redraw to update the canvas
+        self.canvas.queue_draw()
+        
+        # We need to wait for the canvas to be redrawn and adjustments to update
+        # Use idle_add to center after the canvas is updated
+        from gi.repository import GLib
+        def do_center():
+            h_adj = self.scrolled.get_hadjustment()
+            v_adj = self.scrolled.get_vadjustment()
+            
+            # Calculate the page center position
+            page_center_x = padding + page_width / 2
+            page_center_y = padding + page_height / 2
+            
+            # Calculate scroll position to center the page
+            visible_width = h_adj.get_page_size()
+            visible_height = v_adj.get_page_size()
+            
+            target_h = page_center_x - visible_width / 2
+            target_v = page_center_y - visible_height / 2
+            
+            # Clamp to valid ranges
+            target_h = max(h_adj.get_lower(), min(target_h, h_adj.get_upper() - visible_width))
+            target_v = max(v_adj.get_lower(), min(target_v, v_adj.get_upper() - visible_height))
+            
+            # Set scroll positions
+            h_adj.set_value(target_h)
+            v_adj.set_value(target_v)
+            
+            return False  # Don't repeat
+        
+        GLib.idle_add(do_center)
     
     def _on_toggle_grid(self, action, param):
         """Toggle grid visibility."""
