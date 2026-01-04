@@ -407,18 +407,33 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         return box
     
     def _create_draggable_button(self, label, element_type):
-        """Create a button that can be dragged to the canvas."""
+        """Create a button-like widget that can be dragged to the canvas."""
         from gi.repository import Gdk
         
-        btn = Gtk.Button(label=label)
+        # Use a Frame with a Label instead of Button to avoid click event interference
+        frame = Gtk.Frame()
+        frame.set_margin_top(2)
+        frame.set_margin_bottom(2)
+        frame.set_margin_start(2)
+        frame.set_margin_end(2)
         
-        # Make button a drag source
+        lbl = Gtk.Label(label=label)
+        lbl.set_margin_top(6)
+        lbl.set_margin_bottom(6)
+        lbl.set_margin_start(12)
+        lbl.set_margin_end(12)
+        frame.set_child(lbl)
+        
+        # Add CSS class for styling
+        frame.add_css_class("draggable-button")
+        
+        # Make frame a drag source
         drag_source = Gtk.DragSource.new()
         drag_source.set_actions(Gdk.DragAction.COPY)
         drag_source.connect("prepare", self._on_drag_prepare, element_type)
-        btn.add_controller(drag_source)
+        frame.add_controller(drag_source)
         
-        return btn
+        return frame
     
     def _on_drag_prepare(self, source, x, y, element_type):
         """Prepare drag data."""
@@ -724,7 +739,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                     cr.rectangle(hx, hy, handle_size, handle_size)
                     cr.fill()
             
-            elif self.selection_mode == 'image' and element.type == ElementType.PANEL and element.properties.get("image"):
+            elif self.selection_mode == 'image' and (element.type == ElementType.PANEL or element.type == ElementType.CUSTOM_PANEL) and element.properties.get("image"):
                 # Image selection - red solid line around the actual image
                 stored_image_width = element.properties.get("image_width", element.width)
                 stored_image_height = element.properties.get("image_height", element.height)
@@ -764,8 +779,10 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                     cr.rectangle(hx, hy, handle_size, handle_size)
                     cr.fill()
         
-        # Draw vertex handles for custom panels in edit mode
-        if element.type == ElementType.CUSTOM_PANEL and element == self.edit_mode_element:
+        # Draw vertex handles for custom panels in edit mode (not when in image mode)
+        if (element.type == ElementType.CUSTOM_PANEL and 
+            element == self.edit_mode_element and 
+            self.selection_mode != 'image'):
             vertices = element.properties.get("vertices", [])
             handle_size = 8
             cr.set_source_rgb(0.0, 0.8, 0.0)  # Green for vertex handles
@@ -1795,7 +1812,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             in_image = False
             if (element in self.selected_elements and 
                 self.selection_mode == 'image' and
-                element.type == ElementType.PANEL and
+                (element.type == ElementType.PANEL or element.type == ElementType.CUSTOM_PANEL) and
                 element.properties.get("image")):
                 
                 image_width = element.properties.get("image_width", element.width)
@@ -1830,7 +1847,8 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 if clicked_element in self.selected_elements:
                     if self.selection_mode == 'panel':
                         # Panel mode -> Image mode (if panel has image)
-                        if (clicked_element.type == ElementType.PANEL and
+                        if ((clicked_element.type == ElementType.PANEL or 
+                             clicked_element.type == ElementType.CUSTOM_PANEL) and
                             clicked_element.properties.get("image")):
                             self.selection_mode = 'image'
                     else:
@@ -1839,7 +1857,8 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 else:
                     # Double clicking on new element - select and go to image mode if available
                     self.selected_elements = [clicked_element]
-                    if (clicked_element.type == ElementType.PANEL and
+                    if ((clicked_element.type == ElementType.PANEL or
+                         clicked_element.type == ElementType.CUSTOM_PANEL) and
                         clicked_element.properties.get("image")):
                         self.selection_mode = 'image'
                     else:
@@ -1925,8 +1944,10 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         page_x = (start_x - x_offset) / scale
         page_y = (start_y - y_offset) / scale
         
-        # Check if clicking on custom panel vertex handle in edit mode
-        if element.type == ElementType.CUSTOM_PANEL and element == self.edit_mode_element:
+        # Check if clicking on custom panel vertex handle in edit mode (not in image mode)
+        if (element.type == ElementType.CUSTOM_PANEL and 
+            element == self.edit_mode_element and 
+            self.selection_mode != 'image'):
             vertices = element.properties.get("vertices", [])
             handle_size = 8 / scale
             
@@ -1968,7 +1989,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 return
         
         # Handle based on selection mode
-        if self.selection_mode == 'image' and element.type == ElementType.PANEL and element.properties.get("image"):
+        if self.selection_mode == 'image' and (element.type == ElementType.PANEL or element.type == ElementType.CUSTOM_PANEL) and element.properties.get("image"):
             # Image selection mode - work with image bounds
             w = element.width
             h = element.height
@@ -2031,31 +2052,36 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                     return
         else:
             # Panel selection mode - work with panel bounds
-            # Check if clicking on a resize handle
-            handle_size = 8 / scale
-            handles = {
-                'top-left': (element.x, element.y),
-                'top-right': (element.x + element.width, element.y),
-                'bottom-left': (element.x, element.y + element.height),
-                'bottom-right': (element.x + element.width, element.y + element.height),
-            }
+            # Skip resize handles if in edit mode for custom panels
+            in_edit_mode = (element.type == ElementType.CUSTOM_PANEL and element == self.edit_mode_element)
             
-            for handle_name, (hx, hy) in handles.items():
-                if (hx - handle_size <= page_x <= hx + handle_size and
-                    hy - handle_size <= page_y <= hy + handle_size):
-                    self.resizing_element = element
-                    self.resizing_image = False
-                    self.resize_handle = handle_name
-                    self.drag_start_x = page_x
-                    self.drag_start_y = page_y
-                    self.element_start_x = element.x
-                    self.element_start_y = element.y
-                    self.element_start_width = element.width
-                    self.element_start_height = element.height
-                    return
+            if not in_edit_mode:
+                # Check if clicking on a resize handle
+                handle_size = 8 / scale
+                handles = {
+                    'top-left': (element.x, element.y),
+                    'top-right': (element.x + element.width, element.y),
+                    'bottom-left': (element.x, element.y + element.height),
+                    'bottom-right': (element.x + element.width, element.y + element.height),
+                }
+                
+                for handle_name, (hx, hy) in handles.items():
+                    if (hx - handle_size <= page_x <= hx + handle_size and
+                        hy - handle_size <= page_y <= hy + handle_size):
+                        self.resizing_element = element
+                        self.resizing_image = False
+                        self.resize_handle = handle_name
+                        self.drag_start_x = page_x
+                        self.drag_start_y = page_y
+                        self.element_start_x = element.x
+                        self.element_start_y = element.y
+                        self.element_start_width = element.width
+                        self.element_start_height = element.height
+                        return
             
-            # If not on a handle, start dragging the element
-            if (element.x <= page_x <= element.x + element.width and
+            # If not on a handle and not in edit mode, start dragging the element
+            if (not in_edit_mode and
+                element.x <= page_x <= element.x + element.width and
                 element.y <= page_y <= element.y + element.height):
                 self.dragging_element = element
                 self.dragging_image = False
@@ -2167,6 +2193,9 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 self.canvas.queue_draw()
             else:
                 # Resizing the panel itself
+                # For custom panels, we need to scale vertices
+                is_custom_panel = element.type == ElementType.CUSTOM_PANEL
+                
                 if self.resize_handle == 'top-left':
                     new_x = self.element_start_x + dx
                     new_y = self.element_start_y + dy
@@ -2174,6 +2203,17 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                     new_height = self.element_start_height - dy
                     
                     if new_width > 20 and new_height > 20:
+                        if is_custom_panel:
+                            # Scale vertices proportionally
+                            scale_x = new_width / element.width
+                            scale_y = new_height / element.height
+                            vertices = element.properties.get("vertices", [])
+                            scaled_vertices = []
+                            for vertex in vertices:
+                                vx, vy = vertex if isinstance(vertex, (list, tuple)) else (vertex.get("x", 0), vertex.get("y", 0))
+                                scaled_vertices.append((vx * scale_x, vy * scale_y))
+                            element.properties["vertices"] = scaled_vertices
+                        
                         element.x = new_x
                         element.y = new_y
                         element.width = new_width
@@ -2185,6 +2225,17 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                     new_height = self.element_start_height - dy
                     
                     if new_width > 20 and new_height > 20:
+                        if is_custom_panel:
+                            # Scale vertices proportionally
+                            scale_x = new_width / element.width
+                            scale_y = new_height / element.height
+                            vertices = element.properties.get("vertices", [])
+                            scaled_vertices = []
+                            for vertex in vertices:
+                                vx, vy = vertex if isinstance(vertex, (list, tuple)) else (vertex.get("x", 0), vertex.get("y", 0))
+                                scaled_vertices.append((vx * scale_x, vy * scale_y))
+                            element.properties["vertices"] = scaled_vertices
+                        
                         element.y = new_y
                         element.width = new_width
                         element.height = new_height
@@ -2195,6 +2246,17 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                     new_height = self.element_start_height + dy
                     
                     if new_width > 20 and new_height > 20:
+                        if is_custom_panel:
+                            # Scale vertices proportionally
+                            scale_x = new_width / element.width
+                            scale_y = new_height / element.height
+                            vertices = element.properties.get("vertices", [])
+                            scaled_vertices = []
+                            for vertex in vertices:
+                                vx, vy = vertex if isinstance(vertex, (list, tuple)) else (vertex.get("x", 0), vertex.get("y", 0))
+                                scaled_vertices.append((vx * scale_x, vy * scale_y))
+                            element.properties["vertices"] = scaled_vertices
+                        
                         element.x = new_x
                         element.width = new_width
                         element.height = new_height
@@ -2204,6 +2266,17 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                     new_height = self.element_start_height + dy
                     
                     if new_width > 20 and new_height > 20:
+                        if is_custom_panel:
+                            # Scale vertices proportionally
+                            scale_x = new_width / element.width
+                            scale_y = new_height / element.height
+                            vertices = element.properties.get("vertices", [])
+                            scaled_vertices = []
+                            for vertex in vertices:
+                                vx, vy = vertex if isinstance(vertex, (list, tuple)) else (vertex.get("x", 0), vertex.get("y", 0))
+                                scaled_vertices.append((vx * scale_x, vy * scale_y))
+                            element.properties["vertices"] = scaled_vertices
+                        
                         element.width = new_width
                         element.height = new_height
                 
@@ -2291,7 +2364,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         if self.selected_elements:
             element = self.selected_elements[0]
             
-            if self.selection_mode == 'image' and element.type == ElementType.PANEL and element.properties.get("image"):
+            if self.selection_mode == 'image' and (element.type == ElementType.PANEL or element.type == ElementType.CUSTOM_PANEL) and element.properties.get("image"):
                 # Image mode - check image handles and body
                 w = element.width
                 h = element.height
@@ -2327,26 +2400,34 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                     
             elif self.selection_mode == 'panel':
                 # Panel mode - check panel handles and body
-                # Check if on panel resize handles
-                handles = {
-                    'nw-resize': (element.x, element.y),
-                    'ne-resize': (element.x + element.width, element.y),
-                    'sw-resize': (element.x, element.y + element.height),
-                    'se-resize': (element.x + element.width, element.y + element.height),
-                }
+                # Skip resize cursors if in edit mode for custom panels
+                in_edit_mode = (element.type == ElementType.CUSTOM_PANEL and element == self.edit_mode_element)
                 
-                for cursor_name, (hx, hy) in handles.items():
-                    if (hx - handle_size <= page_x <= hx + handle_size and
-                        hy - handle_size <= page_y <= hy + handle_size):
-                        # On panel resize handle - use resize cursor
-                        self.canvas.set_cursor(Gdk.Cursor.new_from_name(cursor_name, None))
-                        return
+                if not in_edit_mode:
+                    # Check if on panel resize handles
+                    handles = {
+                        'nw-resize': (element.x, element.y),
+                        'ne-resize': (element.x + element.width, element.y),
+                        'sw-resize': (element.x, element.y + element.height),
+                        'se-resize': (element.x + element.width, element.y + element.height),
+                    }
+                    
+                    for cursor_name, (hx, hy) in handles.items():
+                        if (hx - handle_size <= page_x <= hx + handle_size and
+                            hy - handle_size <= page_y <= hy + handle_size):
+                            # On panel resize handle - use resize cursor
+                            self.canvas.set_cursor(Gdk.Cursor.new_from_name(cursor_name, None))
+                            return
                 
-                # Check if on panel body
+                # Check if on panel body (or in edit mode - show default cursor)
                 if (element.x <= page_x <= element.x + element.width and
                     element.y <= page_y <= element.y + element.height):
-                    # On panel body - use move cursor
-                    self.canvas.set_cursor(Gdk.Cursor.new_from_name("move", None))
+                    # On panel body - use move cursor (unless in edit mode)
+                    if not in_edit_mode:
+                        self.canvas.set_cursor(Gdk.Cursor.new_from_name("move", None))
+                    else:
+                        # In edit mode - show default cursor (crosshair could be added later)
+                        self.canvas.set_cursor(None)
                     return
         
         # Default cursor
