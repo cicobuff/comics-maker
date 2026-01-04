@@ -36,6 +36,8 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         self.element_start_height = 0
         self.temp_image_width = 0  # Temporary dimensions during drag
         self.temp_image_height = 0
+        self.image_start_offset_x = 0  # For dragging images
+        self.image_start_offset_y = 0
         
         # Image cache to avoid reloading images on every frame
         self.image_cache = {}  # key: (filename, width, height), value: cairo surface
@@ -1151,8 +1153,29 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         # Find clicked element (top to bottom)
         clicked_element = None
         for element in reversed(self.current_page.elements):
-            if (element.x <= page_x <= element.x + element.width and
-                element.y <= page_y <= element.y + element.height):
+            # Check panel bounds
+            in_panel = (element.x <= page_x <= element.x + element.width and
+                       element.y <= page_y <= element.y + element.height)
+            
+            # If element is selected in image mode, also check image bounds (which may extend outside panel)
+            in_image = False
+            if (element in self.selected_elements and 
+                self.selection_mode == 'image' and
+                element.type == ElementType.PANEL and
+                element.properties.get("image")):
+                
+                image_width = element.properties.get("image_width", element.width)
+                image_height = element.properties.get("image_height", element.height)
+                offset_x = element.properties.get("image_offset_x", (element.width - image_width) / 2)
+                offset_y = element.properties.get("image_offset_y", (element.height - image_height) / 2)
+                
+                img_x = element.x + offset_x
+                img_y = element.y + offset_y
+                
+                in_image = (img_x <= page_x <= img_x + image_width and
+                           img_y <= page_y <= img_y + image_height)
+            
+            if in_panel or in_image:
                 clicked_element = element
                 break
         
@@ -1180,7 +1203,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                             clicked_element.properties.get("image")):
                             self.selection_mode = 'image'
                 elif self.selection_mode == 'image':
-                    # Check image resize handles
+                    # In image mode - check if clicking on image resize handles first
                     w = clicked_element.width
                     h = clicked_element.height
                     image_width = clicked_element.properties.get("image_width", int(w))
@@ -1191,6 +1214,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                     img_x = clicked_element.x + offset_x
                     img_y = clicked_element.y + offset_y
                     
+                    # Check if clicking on image resize handles (don't toggle if on handle)
                     handles = [
                         (img_x, img_y),
                         (img_x + image_width, img_y),
@@ -1202,8 +1226,19 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                                    for hx, hy in handles)
                     
                     if not on_handle:
-                        # Not on a handle, toggle back to panel mode
-                        self.selection_mode = 'panel'
+                        # Not on a handle, check bounds to decide if we should toggle
+                        # Check if clicking inside the image bounds
+                        in_image_bounds = (img_x <= page_x <= img_x + image_width and
+                                          img_y <= page_y <= img_y + image_height)
+                        
+                        # Check if clicking inside the panel bounds
+                        in_panel_bounds = (clicked_element.x <= page_x <= clicked_element.x + clicked_element.width and
+                                          clicked_element.y <= page_y <= clicked_element.y + clicked_element.height)
+                        
+                        # Only toggle back to panel mode if clicking inside panel but outside image
+                        if in_panel_bounds and not in_image_bounds:
+                            self.selection_mode = 'panel'
+                        # Otherwise stay in image mode (clicking on image body, even if outside panel)
             else:
                 # New selection - start with panel mode
                 self.selected_elements = [clicked_element]
@@ -1286,6 +1321,18 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                         self.temp_image_width = self.element_start_width
                         self.temp_image_height = self.element_start_height
                         return
+                
+                # Not on a handle, check if clicking on image body to drag it
+                if (img_x <= page_x <= img_x + surface_width and
+                    img_y <= page_y <= img_y + surface_height):
+                    self.dragging_element = element
+                    self.dragging_image = True
+                    self.drag_start_x = page_x
+                    self.drag_start_y = page_y
+                    # Store current offsets
+                    self.image_start_offset_x = element.properties.get("image_offset_x", (element.width - surface_width) / 2)
+                    self.image_start_offset_y = element.properties.get("image_offset_y", (element.height - surface_height) / 2)
+                    return
         else:
             # Panel selection mode - work with panel bounds
             # Check if clicking on a resize handle
@@ -1330,19 +1377,29 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         dy = offset_y / scale
         
         if self.dragging_element:
-            # Move the element
-            self.dragging_element.x = self.element_start_x + dx
-            self.dragging_element.y = self.element_start_y + dy
-            
-            # Constrain to page bounds
-            if self.dragging_element.x < 0:
-                self.dragging_element.x = 0
-            if self.dragging_element.y < 0:
-                self.dragging_element.y = 0
-            if self.dragging_element.x + self.dragging_element.width > self.current_page.width:
-                self.dragging_element.x = self.current_page.width - self.dragging_element.width
-            if self.dragging_element.y + self.dragging_element.height > self.current_page.height:
-                self.dragging_element.y = self.current_page.height - self.dragging_element.height
+            if self.dragging_image:
+                # Moving the image inside the panel
+                element = self.dragging_element
+                new_offset_x = self.image_start_offset_x + dx
+                new_offset_y = self.image_start_offset_y + dy
+                
+                # Update image offset (no constraints, allow image to move freely)
+                element.properties["image_offset_x"] = new_offset_x
+                element.properties["image_offset_y"] = new_offset_y
+            else:
+                # Move the element/panel
+                self.dragging_element.x = self.element_start_x + dx
+                self.dragging_element.y = self.element_start_y + dy
+                
+                # Constrain to page bounds
+                if self.dragging_element.x < 0:
+                    self.dragging_element.x = 0
+                if self.dragging_element.y < 0:
+                    self.dragging_element.y = 0
+                if self.dragging_element.x + self.dragging_element.width > self.current_page.width:
+                    self.dragging_element.x = self.current_page.width - self.dragging_element.width
+                if self.dragging_element.y + self.dragging_element.height > self.current_page.height:
+                    self.dragging_element.y = self.current_page.height - self.dragging_element.height
             
             self.canvas.queue_draw()
         
@@ -1443,6 +1500,8 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         self.resize_handle = None
         self.temp_image_width = 0
         self.temp_image_height = 0
+        self.image_start_offset_x = 0
+        self.image_start_offset_y = 0
     
     def _on_bring_to_front(self, button):
         """Bring selected element to front."""
