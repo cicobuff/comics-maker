@@ -469,8 +469,12 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                     img_x = x + offset_x
                     img_y = y + offset_y
                     
-                    # Draw the image
+                    # Draw the image with clipping to panel bounds
                     cr.save()
+                    # Set clipping region to panel boundaries
+                    cr.rectangle(x, y, w, h)
+                    cr.clip()
+                    # Draw the image
                     cr.translate(img_x, img_y)
                     cr.set_source_surface(surface, 0, 0)
                     cr.paint()
@@ -482,6 +486,11 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                         preview_x = x + offset_x
                         preview_y = y + offset_y
                         
+                        # Clip to panel boundaries for preview as well
+                        cr.save()
+                        cr.rectangle(x, y, w, h)
+                        cr.clip()
+                        
                         # Draw semi-transparent overlay
                         cr.set_source_rgba(1.0, 0.0, 0.0, 0.2)  # Red with transparency
                         cr.rectangle(preview_x, preview_y, self.temp_image_width, self.temp_image_height)
@@ -492,6 +501,8 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                         cr.set_line_width(3)
                         cr.rectangle(preview_x, preview_y, self.temp_image_width, self.temp_image_height)
                         cr.stroke()
+                        
+                        cr.restore()
                 else:
                     # Failed to load, show pattern
                     self._draw_panel_pattern(cr, x, y, w, h, bg_color)
