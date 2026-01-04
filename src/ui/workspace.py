@@ -26,6 +26,11 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         # Connect to close request signal
         self.connect("close-request", self._on_close_request)
         
+        # Add key controller at window level for Ctrl+ and Ctrl- shortcuts
+        key_controller = Gtk.EventControllerKey.new()
+        key_controller.connect("key-pressed", self._on_key_pressed)
+        self.add_controller(key_controller)
+        
         self._build_ui()
         
         if self.project.pages:
@@ -215,6 +220,17 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         self.canvas = Gtk.DrawingArea()
         self.canvas.set_draw_func(self._draw_canvas)
         self.canvas.set_size_request(800, 600)
+        
+        # Make canvas focusable so it can receive keyboard events
+        self.canvas.set_can_focus(True)
+        self.canvas.set_focusable(True)
+        
+        # Add scroll controller for zoom
+        scroll_controller = Gtk.EventControllerScroll.new(
+            Gtk.EventControllerScrollFlags.VERTICAL
+        )
+        scroll_controller.connect("scroll", self._on_canvas_scroll)
+        self.canvas.add_controller(scroll_controller)
         
         scrolled.set_child(self.canvas)
         
@@ -419,6 +435,38 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         """Toggle grid visibility."""
         self.grid_visible = not self.grid_visible
         self.canvas.queue_draw()
+    
+    def _on_canvas_scroll(self, controller, dx, dy):
+        """Handle scroll events on canvas for zooming."""
+        # Get modifier state to check for Ctrl key
+        modifiers = controller.get_current_event_state()
+        
+        # dy < 0 means scroll up (zoom in), dy > 0 means scroll down (zoom out)
+        if dy < 0:
+            self._on_zoom_in(None, None)
+        else:
+            self._on_zoom_out(None, None)
+        
+        return True
+    
+    def _on_key_pressed(self, controller, keyval, keycode, state):
+        """Handle key press events for Ctrl+/Ctrl- shortcuts."""
+        from gi.repository import Gdk
+        
+        # Check if Ctrl is pressed
+        ctrl_pressed = state & Gdk.ModifierType.CONTROL_MASK
+        
+        if ctrl_pressed:
+            # Ctrl + = or Ctrl + Plus for zoom in
+            if keyval in (Gdk.KEY_plus, Gdk.KEY_equal, Gdk.KEY_KP_Add):
+                self._on_zoom_in(None, None)
+                return True
+            # Ctrl - or Ctrl Minus for zoom out
+            elif keyval in (Gdk.KEY_minus, Gdk.KEY_KP_Subtract):
+                self._on_zoom_out(None, None)
+                return True
+        
+        return False
     
     def _on_close_request(self, window):
         """Handle window close request."""
