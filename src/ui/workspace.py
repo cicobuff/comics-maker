@@ -1199,71 +1199,38 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 clicked_element = element
                 break
         
-        # Update selection
+        # Update selection based on single or double click
         if clicked_element:
-            # Check if clicking on a resize handle - if so, don't toggle selection mode
-            if clicked_element in self.selected_elements:
-                handle_size = 8 / scale
-                
-                # Check panel resize handles
-                if self.selection_mode == 'panel':
-                    handles = [
-                        (clicked_element.x, clicked_element.y),
-                        (clicked_element.x + clicked_element.width, clicked_element.y),
-                        (clicked_element.x, clicked_element.y + clicked_element.height),
-                        (clicked_element.x + clicked_element.width, clicked_element.y + clicked_element.height),
-                    ]
-                    on_handle = any(hx - handle_size <= page_x <= hx + handle_size and
-                                   hy - handle_size <= page_y <= hy + handle_size
-                                   for hx, hy in handles)
-                    
-                    if not on_handle:
-                        # Not on a handle, check if we should toggle to image mode
+            if n_press == 1:
+                # Single click
+                if clicked_element in self.selected_elements:
+                    # Clicking on already selected element - keep current mode (sticky image selection)
+                    pass
+                else:
+                    # Clicking on different element - select it in panel mode
+                    self.selected_elements = [clicked_element]
+                    self.selection_mode = 'panel'
+            elif n_press == 2:
+                # Double click - toggle between panel and image mode
+                if clicked_element in self.selected_elements:
+                    if self.selection_mode == 'panel':
+                        # Panel mode -> Image mode (if panel has image)
                         if (clicked_element.type == ElementType.PANEL and
                             clicked_element.properties.get("image")):
                             self.selection_mode = 'image'
-                elif self.selection_mode == 'image':
-                    # In image mode - check if clicking on image resize handles first
-                    w = clicked_element.width
-                    h = clicked_element.height
-                    image_width = clicked_element.properties.get("image_width", int(w))
-                    image_height = clicked_element.properties.get("image_height", int(h))
-                    offset_x = clicked_element.properties.get("image_offset_x", (w - image_width) / 2)
-                    offset_y = clicked_element.properties.get("image_offset_y", (h - image_height) / 2)
-                    
-                    img_x = clicked_element.x + offset_x
-                    img_y = clicked_element.y + offset_y
-                    
-                    # Check if clicking on image resize handles (don't toggle if on handle)
-                    handles = [
-                        (img_x, img_y),
-                        (img_x + image_width, img_y),
-                        (img_x, img_y + image_height),
-                        (img_x + image_width, img_y + image_height),
-                    ]
-                    on_handle = any(hx - handle_size <= page_x <= hx + handle_size and
-                                   hy - handle_size <= page_y <= hy + handle_size
-                                   for hx, hy in handles)
-                    
-                    if not on_handle:
-                        # Not on a handle, check bounds to decide if we should toggle
-                        # Check if clicking inside the image bounds
-                        in_image_bounds = (img_x <= page_x <= img_x + image_width and
-                                          img_y <= page_y <= img_y + image_height)
-                        
-                        # Check if clicking inside the panel bounds
-                        in_panel_bounds = (clicked_element.x <= page_x <= clicked_element.x + clicked_element.width and
-                                          clicked_element.y <= page_y <= clicked_element.y + clicked_element.height)
-                        
-                        # Only toggle back to panel mode if clicking inside panel but outside image
-                        if in_panel_bounds and not in_image_bounds:
-                            self.selection_mode = 'panel'
-                        # Otherwise stay in image mode (clicking on image body, even if outside panel)
-            else:
-                # New selection - start with panel mode
-                self.selected_elements = [clicked_element]
-                self.selection_mode = 'panel'
+                    else:
+                        # Image mode -> Panel mode
+                        self.selection_mode = 'panel'
+                else:
+                    # Double clicking on new element - select and go to image mode if available
+                    self.selected_elements = [clicked_element]
+                    if (clicked_element.type == ElementType.PANEL and
+                        clicked_element.properties.get("image")):
+                        self.selection_mode = 'image'
+                    else:
+                        self.selection_mode = 'panel'
         else:
+            # Clicked on empty space
             self.selected_elements = []
             self.selection_mode = 'panel'
         
