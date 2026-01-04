@@ -1906,20 +1906,20 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 width = 200
                 height = 150
                 
-                # Create 4 control points for a circular bubble
-                # Points are placed to form a circle using the width and height as bounding box
+                # Create 8 control points for a rounder bubble
+                # Points are placed around an ellipse using the width and height as bounding box
                 cx = width / 2  # center x
                 cy = height / 2  # center y
                 rx = width / 2  # radius x
                 ry = height / 2  # radius y
                 
-                # 4 control points at top, right, bottom, left (relative to element origin)
-                control_points = [
-                    (cx, 0),              # top
-                    (width, cy),          # right
-                    (cx, height),         # bottom
-                    (0, cy)               # left
-                ]
+                # 8 control points evenly distributed around the ellipse
+                control_points = []
+                for i in range(8):
+                    angle = (i * 2 * math.pi) / 8
+                    px = cx + rx * math.cos(angle)
+                    py = cy + ry * math.sin(angle)
+                    control_points.append((px, py))
                 
                 # Tail properties
                 # tail_base_t: parameter along curve (0.0 to 1.0), 0.75 = bottom position
