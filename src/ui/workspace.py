@@ -888,10 +888,10 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
     
     def _draw_panel_pattern_in_path(self, cr, x, y, w, h, bg_color, scale):
         """Draw the dithered dot pattern within the current clipping path."""
-        # Fill with background color first
+        # Fill with background color first (using the preserved clip path)
         bg_r, bg_g, bg_b = self._hex_to_rgb(bg_color)
         cr.set_source_rgb(bg_r, bg_g, bg_b)
-        cr.paint()
+        cr.fill_preserve()  # Fill but preserve the clip path
         
         # Draw grey dithered dot pattern
         cr.set_source_rgb(0.85, 0.85, 0.85)  # Light grey
@@ -912,6 +912,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             while current_x < x + w:
                 # Only draw dot if it's within the bounds
                 if current_x >= x and current_x <= x + w and current_y >= y and current_y <= y + h:
+                    cr.new_path()  # Start new path for each dot
                     cr.arc(current_x, current_y, dot_size / 2, 0, 2 * 3.14159)
                     cr.fill()
                 current_x += dot_spacing
