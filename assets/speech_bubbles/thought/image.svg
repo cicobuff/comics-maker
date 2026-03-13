@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 150" width="200" height="150">
+  <!-- Main thought bubble body only (no tail - tail is drawn dynamically) -->
+  <ellipse cx="100" cy="75" rx="85" ry="65" 
+           fill="white" stroke="black" stroke-width="3"/>
+</svg>

@@ -148,7 +148,7 @@ This is a project that creates an app for Comics creation and exporting.
 
 * textareas and speech bubbles should have "Enter text here" as starting text
 
-## Comic panel borders 
+## Comic pan/seel borders 
 
 * Comic panel borders should be configurable with reasonable defaults in config.json
 

@@ -1,11 +1,30 @@
 #!/usr/bin/env python3
-import gi
-gi.require_version('Gtk', '4.0')
-from gi.repository import Gtk, Gio
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+
+# Register bundled fonts with Fontconfig before GTK initializes
+def _register_bundled_fonts():
+    fonts_dir = Path(__file__).parent / "assets" / "fonts"
+    if not fonts_dir.exists():
+        return
+    try:
+        import ctypes
+        fc = ctypes.cdll.LoadLibrary("libfontconfig.so.1")
+        fc.FcConfigGetCurrent.restype = ctypes.c_void_p
+        fc.FcConfigAppFontAddDir.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        fc.FcConfigAppFontAddDir.restype = ctypes.c_int
+        config = fc.FcConfigGetCurrent()
+        fc.FcConfigAppFontAddDir(config, str(fonts_dir).encode())
+    except Exception as e:
+        print(f"Warning: could not register bundled fonts: {e}")
+
+_register_bundled_fonts()
+
+import gi
+gi.require_version('Gtk', '4.0')
+from gi.repository import Gtk, Gio
 
 from src.core.config import Config
 from src.ui.setup_screen import SetupScreen

@@ -69,7 +69,7 @@ class Page:
             "id": self.id,
             "width": self.width,
             "height": self.height,
-            "elements": [e.to_dict() for e in self.elements]
+            "elements": [e.to_dict() for e in self.elements],
         }
     
     @staticmethod

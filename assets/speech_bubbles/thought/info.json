@@ -1,0 +1,19 @@
+{
+  "name": "Thought Bubble",
+  "type": "thought",
+  "default_width": 200,
+  "default_height": 150,
+  "text_area": {
+    "x": 20,
+    "y": 15,
+    "width": 160,
+    "height": 100,
+    "padding": 10,
+    "font": "Arial",
+    "font_size": 12,
+    "text_color": "#000000",
+    "text_align": "center",
+    "vertical_align": "middle"
+  },
+  "default_text": "Enter text here"
+}

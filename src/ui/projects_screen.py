@@ -39,6 +39,7 @@ class ProjectsScreen(Gtk.Window):
         
         self.list_box = Gtk.ListBox()
         self.list_box.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.list_box.set_activate_on_single_click(False)
         self.list_box.connect("row-activated", self._on_row_activated)
         scrolled.set_child(self.list_box)
         
@@ -57,7 +58,7 @@ class ProjectsScreen(Gtk.Window):
         button_box.append(delete_btn)
         
         box.append(button_box)
-        
+
         self.set_child(box)
     
     def _load_projects(self):
@@ -101,17 +102,33 @@ class ProjectsScreen(Gtk.Window):
         entry = Gtk.Entry()
         entry.set_placeholder_text("My Comic")
         box.append(entry)
-        
-        dialog.connect("response", lambda d, r: self._on_new_project_response(d, r, entry))
+
+        orient_label = Gtk.Label(label="Orientation:")
+        box.append(orient_label)
+
+        orient_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        portrait_btn = Gtk.CheckButton(label="Portrait (1536x2048)")
+        landscape_btn = Gtk.CheckButton(label="Landscape (2048x1536)")
+        landscape_btn.set_group(portrait_btn)
+        portrait_btn.set_active(True)
+        orient_box.append(portrait_btn)
+        orient_box.append(landscape_btn)
+        box.append(orient_box)
+
+        dialog.connect("response", lambda d, r: self._on_new_project_response(d, r, entry, landscape_btn))
         dialog.present()
     
-    def _on_new_project_response(self, dialog, response, entry):
+    def _on_new_project_response(self, dialog, response, entry, landscape_btn):
         """Handle new project dialog response."""
         if response == Gtk.ResponseType.OK:
             name = entry.get_text().strip()
             if name:
                 projects_dir = Path(self.config.get("projects_directory"))
-                project = Project.create_new(name, projects_dir)
+                if landscape_btn.get_active():
+                    template = {"width": 2048, "height": 1536}
+                else:
+                    template = {"width": 1536, "height": 2048}
+                project = Project.create_new(name, projects_dir, template=template)
                 self._load_projects()
                 
                 if self.on_project_selected_callback:
@@ -124,17 +141,18 @@ class ProjectsScreen(Gtk.Window):
         """Open selected project."""
         selected = self.list_box.get_selected_row()
         if selected:
-            project = Project.load(selected.project_path)
-            if self.on_project_selected_callback:
-                self.on_project_selected_callback(project)
-                self.hide()
-    
+            self._open_project(selected.project_path)
+
     def _on_row_activated(self, list_box, row):
         """Handle row double-click."""
-        project = Project.load(row.project_path)
+        self._open_project(row.project_path)
+
+    def _open_project(self, project_path):
+        """Load project and hand off to workspace (which shows its own loading state)."""
+        project = Project.load(project_path)
         if self.on_project_selected_callback:
             self.on_project_selected_callback(project)
-            self.hide()
+        self.hide()
     
     def _on_delete_project(self, button):
         """Delete selected project."""

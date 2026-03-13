@@ -13,6 +13,8 @@ class Project:
         self.page_width = width
         self.page_height = height
         self.pages: List[Page] = []
+        self.gridlines_h: List[float] = []  # horizontal guideline Y positions (shared across pages)
+        self.gridlines_v: List[float] = []  # vertical guideline X positions (shared across pages)
         self.created = datetime.now().isoformat()
         self.modified = datetime.now().isoformat()
         
@@ -69,7 +71,9 @@ class Project:
             "modified": self.modified,
             "page_width": self.page_width,
             "page_height": self.page_height,
-            "pages": [p.to_dict() for p in self.pages]
+            "pages": [p.to_dict() for p in self.pages],
+            "gridlines_h": self.gridlines_h,
+            "gridlines_v": self.gridlines_v,
         }
         
         with open(self.project_file, 'w') as f:
@@ -92,7 +96,9 @@ class Project:
         project.created = data.get("created", datetime.now().isoformat())
         project.modified = data.get("modified", datetime.now().isoformat())
         project.pages = [Page.from_dict(p) for p in data.get("pages", [])]
-        
+        project.gridlines_h = data.get("gridlines_h", [])
+        project.gridlines_v = data.get("gridlines_v", [])
+
         return project
     
     @staticmethod
