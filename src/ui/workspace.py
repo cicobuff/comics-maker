@@ -7,6 +7,102 @@ from ..models.element import Element, ElementType
 from ..core.undo_manager import UndoManager
 
 
+def _get_available_fonts():
+    """Get sorted list of all available font families from PangoCairo."""
+    font_map = PangoCairo.FontMap.get_default()
+    families = font_map.list_families()
+    names = sorted({f.get_name() for f in families}, key=str.casefold)
+    return names
+
+
+_AVAILABLE_FONTS = _get_available_fonts()
+
+
+_font_attr_cache = {}
+
+
+def _get_font_attrs(name):
+    """Get cached Pango AttrList for a font name."""
+    if name not in _font_attr_cache:
+        desc = Pango.FontDescription.from_string(name)
+        attrs = Pango.AttrList()
+        attrs.insert(Pango.attr_font_desc_new(desc))
+        _font_attr_cache[name] = attrs
+    return _font_attr_cache[name]
+
+
+def _on_font_item_setup(factory, list_item):
+    label = Gtk.Label(xalign=0)
+    label.set_ellipsize(Pango.EllipsizeMode.END)
+    list_item.set_child(label)
+
+
+def _on_font_item_bind(factory, list_item):
+    label = list_item.get_child()
+    name = list_item.get_item().get_string()
+    label.set_text(name)
+    label.set_attributes(_get_font_attrs(name))
+
+
+def _create_font_combo():
+    """Create a DropDown with virtualized, lazily rendered font previews."""
+    string_list = Gtk.StringList()
+    for name in _AVAILABLE_FONTS:
+        string_list.append(name)
+
+    factory = Gtk.SignalListItemFactory()
+    factory.connect("setup", _on_font_item_setup)
+    factory.connect("bind", _on_font_item_bind)
+
+    dropdown = Gtk.DropDown(model=string_list)
+    dropdown.set_factory(factory)
+    dropdown.set_enable_search(True)
+    dropdown.set_selected(0)
+    return dropdown
+
+
+def _get_combo_font(combo):
+    """Get the active font name from a font DropDown."""
+    item = combo.get_selected_item()
+    if item:
+        return item.get_string()
+    return None
+
+
+def _set_combo_font(combo, font_name):
+    """Set the active font by name, appending if not found."""
+    model = combo.get_model()
+    for i in range(model.get_n_items()):
+        if model.get_string(i) == font_name:
+            combo.set_selected(i)
+            return
+    model.append(font_name)
+    combo.set_selected(model.get_n_items() - 1)
+
+
+def _start_font_cache_warmup():
+    """Pre-warm font loading in background idle callbacks."""
+    font_iter = iter(_AVAILABLE_FONTS)
+    font_map = PangoCairo.FontMap.get_default()
+    context = font_map.create_context()
+
+    def _warmup_batch():
+        for _ in range(5):
+            try:
+                name = next(font_iter)
+                desc = Pango.FontDescription.from_string(name)
+                font_map.load_font(context, desc)
+                _get_font_attrs(name)
+            except StopIteration:
+                return GLib.SOURCE_REMOVE
+        return GLib.SOURCE_CONTINUE
+
+    GLib.idle_add(_warmup_batch)
+
+
+_start_font_cache_warmup()
+
+
 class WorkspaceWindow(Gtk.ApplicationWindow):
     """Main project workspace window."""
     
@@ -62,6 +158,12 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         self.dragging_tail_tip = False  # True if dragging tail tip
         self.dragging_tail_base = False  # True if dragging tail base along curve
         self.tail_base_t_start = 0  # Initial tail_base_t value
+
+        # Rotation state for TEXT / TEXTAREA
+        self.rotation_mode = False  # True when rotation handle is active
+        self.rotating_element = None  # Element being rotated during drag
+        self.rotation_start_angle = 0  # Element angle at drag start
+        self.rotation_drag_start_angle = 0  # Mouse angle at drag start
 
         # Speech bubble properties panel state
         self._updating_properties = False
@@ -593,15 +695,9 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         # Font family
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         row.append(Gtk.Label(label="Font:", xalign=0))
-        self.prop_font_family = Gtk.ComboBoxText()
-        self._font_list = ["Arial", "Sans", "Serif", "Monospace", "Comic Sans MS",
-                           "Impact", "Georgia", "Verdana", "Courier New",
-                           "Times New Roman", "Helvetica", "Palatino"]
-        for f in self._font_list:
-            self.prop_font_family.append_text(f)
-        self.prop_font_family.set_active(0)
+        self.prop_font_family = _create_font_combo()
         self.prop_font_family.set_hexpand(True)
-        self.prop_font_family.connect("changed", self._on_prop_font_family_changed)
+        self.prop_font_family.connect("notify::selected", self._on_prop_font_family_changed)
         row.append(self.prop_font_family)
         panel.append(row)
 
@@ -722,19 +818,9 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
 
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         row.append(Gtk.Label(label="Family:", xalign=0))
-        self.text_prop_font = Gtk.ComboBoxText()
-        self._text_font_list = [
-            "Bangers", "Permanent Marker", "Bungee", "Fredoka",
-            "Lilita One", "Passion One", "Luckiest Guy",
-            "Impact", "Comic Sans MS", "Arial", "Sans", "Serif",
-            "Monospace", "Georgia", "Verdana", "Courier New",
-            "Times New Roman", "Helvetica", "Palatino"
-        ]
-        for f in self._text_font_list:
-            self.text_prop_font.append_text(f)
-        self.text_prop_font.set_active(0)
+        self.text_prop_font = _create_font_combo()
         self.text_prop_font.set_hexpand(True)
-        self.text_prop_font.connect("changed", self._on_text_prop_font_changed)
+        self.text_prop_font.connect("notify::selected", self._on_text_prop_font_changed)
         row.append(self.text_prop_font)
         panel.append(row)
 
@@ -745,6 +831,16 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         self.text_prop_font_size.set_hexpand(True)
         self.text_prop_font_size.connect("value-changed", self._on_text_prop_font_size_changed)
         row.append(self.text_prop_font_size)
+        panel.append(row)
+
+        # Line spacing
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        row.append(Gtk.Label(label="Line Spacing:", xalign=0))
+        adj = Gtk.Adjustment(value=1.0, lower=0.5, upper=5.0, step_increment=0.1)
+        self.text_prop_line_spacing = Gtk.SpinButton(adjustment=adj, digits=1)
+        self.text_prop_line_spacing.set_hexpand(True)
+        self.text_prop_line_spacing.connect("value-changed", self._on_text_prop_line_spacing_changed)
+        row.append(self.text_prop_line_spacing)
         panel.append(row)
 
         # Bold / Italic
@@ -888,12 +984,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
 
         # Font family
         font = props.get("font", "Arial")
-        if font in self._font_list:
-            self.prop_font_family.set_active(self._font_list.index(font))
-        else:
-            self._font_list.append(font)
-            self.prop_font_family.append_text(font)
-            self.prop_font_family.set_active(len(self._font_list) - 1)
+        _set_combo_font(self.prop_font_family, font)
 
         # Font size
         self.prop_font_size.set_value(props.get("font_size", 14))
@@ -962,12 +1053,12 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             element.properties["text"] = buf.get_text(start, end, False)
             self.canvas.queue_draw()
 
-    def _on_prop_font_family_changed(self, combo):
+    def _on_prop_font_family_changed(self, combo, pspec=None):
         if self._updating_properties:
             return
         element = self.selected_elements[0] if self.selected_elements else None
         if element and element.type == ElementType.SPEECH_BUBBLE:
-            font = combo.get_active_text()
+            font = _get_combo_font(combo)
             if font:
                 element.properties["font"] = font
                 self.canvas.queue_draw()
@@ -1049,14 +1140,10 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         buf.set_text(props.get("text", ""))
 
         font = props.get("font", "Arial")
-        if font in self._text_font_list:
-            self.text_prop_font.set_active(self._text_font_list.index(font))
-        else:
-            self.text_prop_font.append_text(font)
-            self._text_font_list.append(font)
-            self.text_prop_font.set_active(len(self._text_font_list) - 1)
+        _set_combo_font(self.text_prop_font, font)
 
         self.text_prop_font_size.set_value(props.get("font_size", 48))
+        self.text_prop_line_spacing.set_value(props.get("line_spacing", 1.0))
         self.text_prop_bold.set_active(props.get("bold", False))
         self.text_prop_italic.set_active(props.get("italic", False))
 
@@ -1089,12 +1176,12 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             element.properties["text"] = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
             self.canvas.queue_draw()
 
-    def _on_text_prop_font_changed(self, combo):
+    def _on_text_prop_font_changed(self, combo, pspec=None):
         if self._updating_properties:
             return
         element = self.selected_elements[0] if self.selected_elements else None
         if element and element.type == ElementType.TEXT:
-            element.properties["font"] = combo.get_active_text()
+            element.properties["font"] = _get_combo_font(combo)
             self.canvas.queue_draw()
 
     def _on_text_prop_font_size_changed(self, spin):
@@ -1103,6 +1190,14 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         element = self.selected_elements[0] if self.selected_elements else None
         if element and element.type == ElementType.TEXT:
             element.properties["font_size"] = int(spin.get_value())
+            self.canvas.queue_draw()
+
+    def _on_text_prop_line_spacing_changed(self, spin):
+        if self._updating_properties:
+            return
+        element = self.selected_elements[0] if self.selected_elements else None
+        if element and element.type == ElementType.TEXT:
+            element.properties["line_spacing"] = spin.get_value()
             self.canvas.queue_draw()
 
     def _on_text_prop_bold_changed(self, btn):
@@ -1212,19 +1307,9 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
 
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         row.append(Gtk.Label(label="Family:", xalign=0))
-        self.ta_prop_font = Gtk.ComboBoxText()
-        self._ta_font_list = [
-            "Arial", "Sans", "Serif", "Monospace", "Comic Sans MS",
-            "Impact", "Georgia", "Verdana", "Courier New",
-            "Times New Roman", "Helvetica", "Palatino",
-            "Bangers", "Permanent Marker", "Bungee", "Fredoka",
-            "Lilita One", "Passion One", "Luckiest Guy",
-        ]
-        for f in self._ta_font_list:
-            self.ta_prop_font.append_text(f)
-        self.ta_prop_font.set_active(0)
+        self.ta_prop_font = _create_font_combo()
         self.ta_prop_font.set_hexpand(True)
-        self.ta_prop_font.connect("changed", self._on_ta_prop_font_changed)
+        self.ta_prop_font.connect("notify::selected", self._on_ta_prop_font_changed)
         row.append(self.ta_prop_font)
         panel.append(row)
 
@@ -1235,6 +1320,16 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         self.ta_prop_font_size.set_hexpand(True)
         self.ta_prop_font_size.connect("value-changed", self._on_ta_prop_spin_changed, "font_size")
         row.append(self.ta_prop_font_size)
+        panel.append(row)
+
+        # Line spacing
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        row.append(Gtk.Label(label="Line Spacing:", xalign=0))
+        adj = Gtk.Adjustment(value=1.0, lower=0.5, upper=5.0, step_increment=0.1)
+        self.ta_prop_line_spacing = Gtk.SpinButton(adjustment=adj, digits=1)
+        self.ta_prop_line_spacing.set_hexpand(True)
+        self.ta_prop_line_spacing.connect("value-changed", self._on_ta_prop_spin_changed, "line_spacing")
+        row.append(self.ta_prop_line_spacing)
         panel.append(row)
 
         # Bold / Italic
@@ -1389,14 +1484,10 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         buf.set_text(props.get("text", ""))
 
         font = props.get("font", "Arial")
-        if font in self._ta_font_list:
-            self.ta_prop_font.set_active(self._ta_font_list.index(font))
-        else:
-            self.ta_prop_font.append_text(font)
-            self._ta_font_list.append(font)
-            self.ta_prop_font.set_active(len(self._ta_font_list) - 1)
+        _set_combo_font(self.ta_prop_font, font)
 
         self.ta_prop_font_size.set_value(props.get("font_size", 16))
+        self.ta_prop_line_spacing.set_value(props.get("line_spacing", 1.0))
         self.ta_prop_bold.set_active(props.get("bold", False))
         self.ta_prop_italic.set_active(props.get("italic", False))
 
@@ -1450,12 +1541,12 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             element.properties[prop_name] = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
             self.canvas.queue_draw()
 
-    def _on_ta_prop_font_changed(self, combo):
+    def _on_ta_prop_font_changed(self, combo, pspec=None):
         if self._updating_properties:
             return
         element = self.selected_elements[0] if self.selected_elements else None
         if element and element.type == ElementType.TEXTAREA:
-            element.properties["font"] = combo.get_active_text()
+            element.properties["font"] = _get_combo_font(combo)
             self.canvas.queue_draw()
 
     def _on_ta_prop_spin_changed(self, spin, prop_name):
@@ -2285,8 +2376,8 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             # Draw other element types (shapes, text, etc.)
             self._draw_other_elements(cr, element, x, y, w, h, scale)
         
-        # Draw selection if selected
-        if element in self.selected_elements:
+        # Draw selection if selected (TEXT and TEXTAREA draw their own in _draw_rotated_element)
+        if element in self.selected_elements and element.type not in (ElementType.TEXT, ElementType.TEXTAREA):
             if self.selection_mode == 'panel':
                 # Panel selection - blue dotted line
                 selection_color = self.config.get("selection_color", "#0066FF")
@@ -2524,10 +2615,12 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         
         elif element.type == ElementType.TEXT:
             # Draw title/large text element
-            self._draw_text_element(cr, element, x, y, w, h, scale)
+            self._draw_rotated_element(cr, element, x, y, w, h, scale,
+                                       self._draw_text_element)
 
         elif element.type == ElementType.TEXTAREA:
-            self._draw_textarea_element(cr, element, x, y, w, h, scale)
+            self._draw_rotated_element(cr, element, x, y, w, h, scale,
+                                       self._draw_textarea_element)
         
         elif element.type == ElementType.SPEECH_BUBBLE:
             # Draw speech bubble
@@ -3132,6 +3225,78 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         cr.move_to(x + text_area_x, y + text_area_y + y_offset)
         PangoCairo.show_layout(cr, layout)
 
+    @staticmethod
+    def _rotation_handle_page_pos(element, scale=1.0):
+        """Get the rotation handle position in page coordinates."""
+        import math
+        cx = element.x + element.width / 2
+        cy = element.y + element.height / 2
+        # Handle is 30 canvas-pixels above element top-center, rotated with element
+        offset = 30 / scale
+        rel_y = -element.height / 2 - offset
+        a = math.radians(element.rotation)
+        hx = cx - rel_y * math.sin(a)
+        hy = cy + rel_y * math.cos(a)
+        return hx, hy
+
+    def _draw_rotated_element(self, cr, element, x, y, w, h, scale, draw_fn):
+        """Draw a TEXT or TEXTAREA element with rotation transform and handles."""
+        import math
+        angle = element.rotation
+        cx = x + w / 2
+        cy = y + h / 2
+
+        cr.save()
+        if angle != 0:
+            cr.translate(cx, cy)
+            cr.rotate(math.radians(angle))
+            cr.translate(-cx, -cy)
+
+        draw_fn(cr, element, x, y, w, h, scale)
+
+        # Draw selection visuals in rotated space
+        if element in self.selected_elements:
+            handle_size = 8
+            # Resize handles at corners
+            selection_color = self.config.get("selection_color", "#0066FF")
+            sel_r, sel_g, sel_b = self._hex_to_rgb(selection_color)
+            cr.set_source_rgb(sel_r, sel_g, sel_b)
+            cr.set_line_width(2)
+            cr.set_dash([5, 5])
+            cr.rectangle(x, y, w, h)
+            cr.stroke()
+            cr.set_dash([])
+
+            for hx, hy in [(x, y), (x + w, y), (x, y + h), (x + w, y + h)]:
+                cr.rectangle(hx - handle_size / 2, hy - handle_size / 2,
+                             handle_size, handle_size)
+                cr.fill()
+
+            # Rotation handle: circle above top-center
+            if self.rotation_mode:
+                rot_handle_y = y - 30
+                rot_handle_x = x + w / 2
+                # Connecting line
+                cr.set_source_rgba(0.2, 0.5, 1.0, 0.6)
+                cr.set_line_width(1.5)
+                cr.move_to(rot_handle_x, y)
+                cr.line_to(rot_handle_x, rot_handle_y)
+                cr.stroke()
+                # Circle handle
+                cr.arc(rot_handle_x, rot_handle_y, 7, 0, 2 * math.pi)
+                cr.set_source_rgba(0.2, 0.5, 1.0, 0.8)
+                cr.fill_preserve()
+                cr.set_source_rgb(1, 1, 1)
+                cr.set_line_width(1.5)
+                cr.stroke()
+                # Rotation arrow icon inside circle
+                cr.set_source_rgb(1, 1, 1)
+                cr.set_line_width(1.5)
+                cr.arc(rot_handle_x, rot_handle_y, 4, -math.pi * 0.8, math.pi * 0.4)
+                cr.stroke()
+
+        cr.restore()
+
     def _draw_text_element(self, cr, element, x, y, w, h, scale):
         """Draw a title/large text element with fill, outline, and style."""
         props = element.properties
@@ -3161,6 +3326,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             font_desc.set_style(Pango.Style.ITALIC)
         layout.set_font_description(font_desc)
         layout.set_text(text, -1)
+        layout.set_line_spacing(props.get("line_spacing", 1.0))
 
         if w > 0:
             layout.set_width(int(w * Pango.SCALE))
@@ -3176,15 +3342,6 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         # Vertical center
         _, layout_height = layout.get_pixel_size()
         y_offset = max(0, (h - layout_height) / 2)
-
-        # Draw selection border when selected (dashed, no fill)
-        if element in self.selected_elements:
-            cr.set_source_rgba(0.2, 0.5, 1.0, 0.5)
-            cr.set_line_width(1)
-            cr.set_dash([4, 4])
-            cr.rectangle(x, y, w, h)
-            cr.stroke()
-            cr.set_dash([])
 
         tx = x
         ty = y + y_offset
@@ -3353,6 +3510,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 font_desc.set_style(Pango.Style.ITALIC)
             layout.set_font_description(font_desc)
             layout.set_text(text, -1)
+            layout.set_line_spacing(props.get("line_spacing", 1.0))
 
             text_w = w - padding * 2
             if text_w > 0:
@@ -4286,6 +4444,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 text="TITLE",
                 font="Bangers",
                 font_size=72,
+                line_spacing=1.0,
                 bold=False,
                 italic=False,
                 text_align="center",
@@ -4302,6 +4461,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 text="Enter text here",
                 font="Arial",
                 font_size=16,
+                line_spacing=1.0,
                 bold=False,
                 italic=False,
                 text_align="left",
@@ -4431,9 +4591,18 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         handle_margin = 8 / scale  # Add margin for resize handles
         
         for element in reversed(self.current_page.elements):
-            # Check panel bounds
-            in_panel = (element.x <= page_x <= element.x + element.width and
-                       element.y <= page_y <= element.y + element.height)
+            # Check panel bounds (un-rotate point for rotated elements)
+            hit_px, hit_py = page_x, page_y
+            if element.rotation != 0 and element.type in (ElementType.TEXT, ElementType.TEXTAREA):
+                import math
+                cx = element.x + element.width / 2
+                cy = element.y + element.height / 2
+                a = math.radians(-element.rotation)
+                dx_r, dy_r = page_x - cx, page_y - cy
+                hit_px = cx + dx_r * math.cos(a) - dy_r * math.sin(a)
+                hit_py = cy + dx_r * math.sin(a) + dy_r * math.cos(a)
+            in_panel = (element.x <= hit_px <= element.x + element.width and
+                       element.y <= hit_py <= element.y + element.height)
 
             # If element is selected in image mode, also check image bounds (which may extend outside panel)
             # Include margin for resize handles
@@ -4485,9 +4654,13 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             if n_press == 1:
                 # Single click
                 if clicked_element in self.selected_elements:
-                    # Clicking on already selected element - keep current mode (sticky image selection)
-                    pass
+                    # Clicking on already selected element
+                    if clicked_element.type in (ElementType.TEXT, ElementType.TEXTAREA):
+                        # Toggle rotation mode for text elements
+                        self.rotation_mode = not self.rotation_mode
+                    # else: keep current mode (sticky image selection)
                 else:
+                    self.rotation_mode = False
                     # Clicking on different element - select it in panel mode
                     self.selected_elements = [clicked_element]
                     self.selection_mode = 'panel'
@@ -4541,6 +4714,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             # Clicked on empty space
             self.selected_elements = []
             self.selection_mode = 'panel'
+            self.rotation_mode = False
         
         self._update_layer_buttons()
         self._update_properties_panel()
@@ -4637,6 +4811,22 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         page_x = (start_x - x_offset) / scale
         page_y = (start_y - y_offset) / scale
         
+        # Check if clicking on rotation handle for TEXT / TEXTAREA
+        if (self.rotation_mode and
+            element.type in (ElementType.TEXT, ElementType.TEXTAREA)):
+            import math
+            rot_hx, rot_hy = self._rotation_handle_page_pos(element, scale)
+            handle_radius = 10 / scale
+            if ((page_x - rot_hx) ** 2 + (page_y - rot_hy) ** 2) <= handle_radius ** 2:
+                cx = element.x + element.width / 2
+                cy = element.y + element.height / 2
+                self.rotating_element = element
+                self.rotation_start_angle = element.rotation
+                self.rotation_drag_start_angle = math.degrees(
+                    math.atan2(page_y - cy, page_x - cx))
+                self.canvas.set_cursor(Gdk.Cursor.new_from_name("crosshair", None))
+                return
+
         # Check if clicking on custom panel vertex handle in edit mode (not in image mode)
         if (element.type == ElementType.CUSTOM_PANEL and
             element == self.edit_mode_element and
@@ -4795,7 +4985,18 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             # Panel selection mode - work with panel bounds
             # Skip resize handles if in edit mode for custom panels
             in_edit_mode = (element.type == ElementType.CUSTOM_PANEL and element == self.edit_mode_element)
-            
+
+            # Un-rotate click point for rotated TEXT/TEXTAREA elements
+            local_px, local_py = page_x, page_y
+            if element.rotation != 0 and element.type in (ElementType.TEXT, ElementType.TEXTAREA):
+                import math
+                cx = element.x + element.width / 2
+                cy = element.y + element.height / 2
+                a = math.radians(-element.rotation)
+                dx_r, dy_r = page_x - cx, page_y - cy
+                local_px = cx + dx_r * math.cos(a) - dy_r * math.sin(a)
+                local_py = cy + dx_r * math.sin(a) + dy_r * math.cos(a)
+
             if not in_edit_mode:
                 # Check if clicking on a resize handle
                 handle_size = 8 / scale
@@ -4805,10 +5006,10 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                     'bottom-left': (element.x, element.y + element.height),
                     'bottom-right': (element.x + element.width, element.y + element.height),
                 }
-                
+
                 for handle_name, (hx, hy) in handles.items():
-                    if (hx - handle_size <= page_x <= hx + handle_size and
-                        hy - handle_size <= page_y <= hy + handle_size):
+                    if (hx - handle_size <= local_px <= hx + handle_size and
+                        hy - handle_size <= local_py <= hy + handle_size):
                         self.resizing_element = element
                         self.resizing_image = False
                         self.resize_handle = handle_name
@@ -4819,11 +5020,11 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                         self.element_start_width = element.width
                         self.element_start_height = element.height
                         return
-            
+
             # If not on a handle and not in edit mode, start dragging the element
             if (not in_edit_mode and
-                element.x <= page_x <= element.x + element.width and
-                element.y <= page_y <= element.y + element.height):
+                element.x <= local_px <= element.x + element.width and
+                element.y <= local_py <= element.y + element.height):
                 self.dragging_element = element
                 self.dragging_image = False
                 self.drag_start_x = page_x
@@ -4870,12 +5071,33 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             self.canvas.queue_draw()
             return
         
+        # Handle rotation drag
+        if self.rotating_element:
+            import math
+            scale = self.zoom_level / 100.0
+            padding = 100
+            ok, start_x, start_y = gesture.get_start_point()
+            cur_x = start_x + offset_x
+            cur_y = start_y + offset_y
+            x_offset = padding + self.pan_offset_x
+            y_offset_p = padding + self.pan_offset_y
+            page_x = (cur_x - x_offset) / scale
+            page_y = (cur_y - y_offset_p) / scale
+            elem = self.rotating_element
+            cx = elem.x + elem.width / 2
+            cy = elem.y + elem.height / 2
+            current_angle = math.degrees(math.atan2(page_y - cy, page_x - cx))
+            delta = current_angle - self.rotation_drag_start_angle
+            elem.rotation = self.rotation_start_angle + delta
+            self.canvas.queue_draw()
+            return
+
         scale = self.zoom_level / 100.0
-        
+
         # Convert offset from canvas to page coordinates
         dx = offset_x / scale
         dy = offset_y / scale
-        
+
         # Handle vertex dragging for custom panels
         if self.dragging_vertex is not None:
             element = self.selected_elements[0] if self.selected_elements else None
@@ -5172,6 +5394,9 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         self.image_start_offset_x = 0
         self.image_start_offset_y = 0
         
+        # Reset rotation drag flags
+        self.rotating_element = None
+
         # Reset speech bubble drag flags
         self.dragging_bubble_control = None
         self.dragging_tail_tip = False
@@ -5216,7 +5441,17 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 return
 
         handle_size = 8 / scale
-        
+
+        # Check if hovering over rotation handle
+        if (self.rotation_mode and self.selected_elements and
+            self.selected_elements[0].type in (ElementType.TEXT, ElementType.TEXTAREA)):
+            element = self.selected_elements[0]
+            rot_hx, rot_hy = self._rotation_handle_page_pos(element, scale)
+            handle_radius = 10 / scale
+            if ((page_x - rot_hx) ** 2 + (page_y - rot_hy) ** 2) <= handle_radius ** 2:
+                self.canvas.set_cursor(Gdk.Cursor.new_from_name("crosshair", None))
+                return
+
         # Check if hovering over selected element
         if self.selected_elements:
             element = self.selected_elements[0]
