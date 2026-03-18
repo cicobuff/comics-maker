@@ -4,7 +4,8 @@ gi.require_version('PangoCairo', '1.0')
 from gi.repository import Gtk, Gio, Gdk, GLib, Pango, PangoCairo
 from ..models.project import Project
 from ..models.element import Element, ElementType
-from ..core.undo_manager import UndoManager
+from ..core.undo_manager import UndoManager, MoveResizeCommand, AddElementCommand, RemoveElementCommand
+import copy
 
 
 def _get_available_fonts():
@@ -174,13 +175,32 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         # Gridline state
         self.gridlines_visible = True
         self.dragging_gridline = None  # ("h", index) or ("v", index)
-        self.gridline_snap_threshold = 5  # pixels in page coordinates
+        self.gridline_snap_threshold = 10  # pixels in page coordinates
         
+        # Internal clipboard for copy/paste (list of element dicts)
+        self._clipboard_elements = []
+
+        # Undo pre-state captured at drag start
+        self._undo_pre_state = None
+
         # Image cache to avoid reloading images on every frame
         self.image_cache = {}  # key: (filename, width, height), value: cairo surface
         
         self.set_title(f"Comics Maker - {project.name}")
-        self.set_default_size(1400, 900)
+        # Size window to 90% of desktop height, maintain 16:10 aspect
+        display = Gdk.Display.get_default()
+        if display:
+            monitors = display.get_monitors()
+            if monitors.get_n_items() > 0:
+                monitor = monitors.get_item(0)
+                geom = monitor.get_geometry()
+                win_height = int(geom.height * 0.9)
+                win_width = int(win_height * 16 / 10)
+                self.set_default_size(win_width, win_height)
+            else:
+                self.set_default_size(1400, 900)
+        else:
+            self.set_default_size(1400, 900)
 
         # Connect to close request signal
         self.connect("close-request", self._on_close_request)
@@ -215,7 +235,20 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             self._update_canvas_size()
 
         self._loading_spinner.stop()
+        # Fit page to canvas height once layout is realized
+        self._initial_zoom_pending = True
+        self._initial_zoom_handler = self.canvas.connect("notify::height", self._on_canvas_height_allocated)
         return False
+
+    def _on_canvas_height_allocated(self, widget, pspec):
+        """Triggered when canvas height changes; used for initial zoom fit."""
+        if not self._initial_zoom_pending:
+            return
+        viewport_height = self.scrolled.get_height()
+        if viewport_height > 1 and self.current_page:
+            self._initial_zoom_pending = False
+            self.canvas.disconnect(self._initial_zoom_handler)
+            self._on_full_page(None, None)
     
     def _build_ui(self):
         """Build the workspace UI."""
@@ -360,6 +393,14 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         zoom_in_btn.connect("clicked", lambda b: self._on_zoom_in(None, None))
         toolbar.append(zoom_in_btn)
         
+        fit_page_btn = Gtk.Button(label="Fit Page")
+        fit_page_btn.connect("clicked", lambda b: self._on_full_page(None, None))
+        toolbar.append(fit_page_btn)
+
+        fit_width_btn = Gtk.Button(label="Fit Width")
+        fit_width_btn.connect("clicked", lambda b: self._on_page_width(None, None))
+        toolbar.append(fit_width_btn)
+
         center_page_btn = Gtk.Button(label="Center Page")
         center_page_btn.connect("clicked", lambda b: self._on_center_page(None, None))
         toolbar.append(center_page_btn)
@@ -3992,57 +4033,105 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         """Quit application."""
         self.get_application().quit()
     
+    def _snapshot_element(self, element):
+        """Capture element state for undo."""
+        return {
+            "x": element.x,
+            "y": element.y,
+            "width": element.width,
+            "height": element.height,
+            "rotation": element.rotation,
+            "properties": copy.deepcopy(element.properties),
+        }
+
     def _on_undo(self, action, param):
         """Undo last action."""
         self.undo_manager.undo()
+        self.selected_elements = []
+        self._update_properties_panel()
+        self._update_layer_buttons()
         self.canvas.queue_draw()
-    
+
     def _on_redo(self, action, param):
         """Redo last action."""
         self.undo_manager.redo()
+        self.selected_elements = []
+        self._update_properties_panel()
+        self._update_layer_buttons()
         self.canvas.queue_draw()
     
     def _on_copy(self, action, param):
-        """Copy selected elements."""
-        pass
-    
+        """Copy selected elements to internal clipboard."""
+        if not self.selected_elements:
+            return
+        self._clipboard_elements = [
+            el.to_dict() for el in self.selected_elements
+        ]
+
     def _on_paste(self, action, param):
-        """Paste elements."""
-        pass
+        """Paste elements from internal clipboard onto the current page."""
+        if not self._clipboard_elements or not self.current_page:
+            return
+        import uuid as _uuid
+        paste_offset = 20
+        new_selection = []
+        for data in self._clipboard_elements:
+            el = Element.from_dict(data)
+            el.id = str(_uuid.uuid4())
+            el.x += paste_offset
+            el.y += paste_offset
+            self.current_page.add_element(el)
+            self.undo_manager.push_command(
+                AddElementCommand(self.current_page, el))
+            new_selection.append(el)
+        self.selected_elements = new_selection
+        self._update_properties_panel()
+        self._update_layer_buttons()
+        self.canvas.queue_draw()
     
     def _on_zoom_in(self, action, param):
         """Zoom in."""
         max_zoom = self.config.get("max_zoom", 800)
-        self.zoom_level = min(self.zoom_level + self.config.get("scroll_zoom_step", 10), max_zoom)
-        self.zoom_label.set_text(f"{self.zoom_level}%")
+        self.zoom_level = min(self.zoom_level * 1.08, max_zoom)
+        self.zoom_label.set_text(f"{int(self.zoom_level)}%")
         self._update_canvas_size()
         self.canvas.queue_draw()
-    
+
     def _on_zoom_out(self, action, param):
         """Zoom out."""
         min_zoom = self.config.get("min_zoom", 10)
-        self.zoom_level = max(self.zoom_level - self.config.get("scroll_zoom_step", 10), min_zoom)
-        self.zoom_label.set_text(f"{self.zoom_level}%")
+        self.zoom_level = max(self.zoom_level / 1.08, min_zoom)
+        self.zoom_label.set_text(f"{int(self.zoom_level)}%")
         self._update_canvas_size()
         self.canvas.queue_draw()
     
     def _on_full_page(self, action, param):
-        """Zoom to fit full page."""
+        """Zoom to fit full page in the visible viewport."""
         if self.current_page:
-            canvas_width = self.canvas.get_width()
-            canvas_height = self.canvas.get_height()
-            zoom_w = (canvas_width / self.current_page.width) * 100
-            zoom_h = (canvas_height / self.current_page.height) * 100
-            self.zoom_level = min(zoom_w, zoom_h) * 0.9
+            padding = 100
+            vp_width = self.scrolled.get_width()
+            vp_height = self.scrolled.get_height()
+            if vp_width < 1 or vp_height < 1:
+                return
+            zoom_w = ((vp_width - padding * 2) / self.current_page.width) * 100
+            zoom_h = ((vp_height - padding * 2) / self.current_page.height) * 100
+            self.zoom_level = min(zoom_w, zoom_h)
+            self.pan_offset_x = 0
+            self.pan_offset_y = 0
             self.zoom_label.set_text(f"{int(self.zoom_level)}%")
             self._update_canvas_size()
             self.canvas.queue_draw()
-    
+
     def _on_page_width(self, action, param):
-        """Zoom to fit page width."""
+        """Zoom to fit page width in the visible viewport."""
         if self.current_page:
-            canvas_width = self.canvas.get_width()
-            self.zoom_level = (canvas_width / self.current_page.width) * 100 * 0.9
+            padding = 100
+            vp_width = self.scrolled.get_width()
+            if vp_width < 1:
+                return
+            self.zoom_level = ((vp_width - padding * 2) / self.current_page.width) * 100
+            self.pan_offset_x = 0
+            self.pan_offset_y = 0
             self.zoom_label.set_text(f"{int(self.zoom_level)}%")
             self._update_canvas_size()
             self.canvas.queue_draw()
@@ -4165,8 +4254,30 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         ctrl_pressed = state & Gdk.ModifierType.CONTROL_MASK
         
         if ctrl_pressed:
+            # Ctrl+S for save
+            if keyval == Gdk.KEY_s:
+                self._on_save(None, None)
+                return True
+            # Ctrl+C for copy
+            elif keyval == Gdk.KEY_c:
+                self._on_copy(None, None)
+                return True
+            # Ctrl+V for paste
+            elif keyval == Gdk.KEY_v:
+                self._on_paste(None, None)
+                return True
+            # Ctrl+Z for undo, Ctrl+Shift+Z for redo
+            elif keyval == Gdk.KEY_z:
+                if state & Gdk.ModifierType.SHIFT_MASK:
+                    self._on_redo(None, None)
+                else:
+                    self._on_undo(None, None)
+                return True
+            elif keyval == Gdk.KEY_y:
+                self._on_redo(None, None)
+                return True
             # Ctrl + = or Ctrl + Plus for zoom in
-            if keyval in (Gdk.KEY_plus, Gdk.KEY_equal, Gdk.KEY_KP_Add):
+            elif keyval in (Gdk.KEY_plus, Gdk.KEY_equal, Gdk.KEY_KP_Add):
                 self._on_zoom_in(None, None)
                 return True
             # Ctrl - or Ctrl Minus for zoom out
@@ -4192,7 +4303,10 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             # Otherwise, delete selected elements
             elif self.selected_elements and self.current_page:
                 for element in self.selected_elements:
+                    idx = self.current_page.elements.index(element)
                     self.current_page.elements.remove(element)
+                    self.undo_manager.push_command(
+                        RemoveElementCommand(self.current_page, element, idx))
                 self.selected_elements = []
                 self.edit_mode_element = None  # Exit edit mode if deleting element
                 self._update_layer_buttons()
@@ -4259,8 +4373,10 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         element = self._create_element_from_type(element_type, page_x, page_y)
         if element:
             self.current_page.add_element(element)
+            self.undo_manager.push_command(
+                AddElementCommand(self.current_page, element))
             self.canvas.queue_draw()
-        
+
         return True  # Always return True to avoid GTK errors
     
     def _handle_file_drop(self, files, x, y):
@@ -4389,7 +4505,9 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 panel.properties["image_offset_y"] = (height - scaled_height) / 2
             
             self.current_page.add_element(panel)
-        
+            self.undo_manager.push_command(
+                AddElementCommand(self.current_page, panel))
+
         self.canvas.queue_draw()
         return True
     
@@ -5019,6 +5137,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                         self.element_start_y = element.y
                         self.element_start_width = element.width
                         self.element_start_height = element.height
+                        self._undo_pre_state = self._snapshot_element(element)
                         return
 
             # If not on a handle and not in edit mode, start dragging the element
@@ -5031,6 +5150,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 self.drag_start_y = page_y
                 self.element_start_x = element.x
                 self.element_start_y = element.y
+                self._undo_pre_state = self._snapshot_element(element)
                 return
 
         # Click didn't hit any element or handle — pan the canvas
@@ -5179,10 +5299,13 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 element = self.dragging_element
                 new_offset_x = self.image_start_offset_x + dx
                 new_offset_y = self.image_start_offset_y + dy
-                
-                # Update image offset (no constraints, allow image to move freely)
+
+                # Update image offset
                 element.properties["image_offset_x"] = new_offset_x
                 element.properties["image_offset_y"] = new_offset_y
+
+                # Snap image edges to panel edges and gridlines
+                self._snap_image_in_panel(element)
             else:
                 # Move the element/panel
                 self.dragging_element.x = self.element_start_x + dx
@@ -5228,7 +5351,10 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                 if new_width > 20 and new_height > 20:
                     self.temp_image_width = new_width
                     self.temp_image_height = new_height
-                
+
+                    # Snap image edges during resize
+                    self._snap_image_resize_in_panel(element, aspect_ratio)
+
                 self.canvas.queue_draw()
             else:
                 # Resizing the panel itself
@@ -5242,6 +5368,8 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                     new_y = self.element_start_y + dy
                     new_width = self.element_start_width - dx
                     new_height = self.element_start_height - dy
+                    new_x, new_y, new_width, new_height = self._snap_resize_candidates(
+                        new_x, new_y, new_width, new_height, self.resize_handle)
 
                     if new_width > 20 and new_height > 20:
                         scale_x = new_width / element.width
@@ -5262,9 +5390,12 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                         element.height = new_height
 
                 elif self.resize_handle == 'top-right':
+                    new_x = element.x
                     new_y = self.element_start_y + dy
                     new_width = self.element_start_width + dx
                     new_height = self.element_start_height - dy
+                    new_x, new_y, new_width, new_height = self._snap_resize_candidates(
+                        new_x, new_y, new_width, new_height, self.resize_handle)
 
                     if new_width > 20 and new_height > 20:
                         scale_x = new_width / element.width
@@ -5285,8 +5416,11 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
 
                 elif self.resize_handle == 'bottom-left':
                     new_x = self.element_start_x + dx
+                    new_y = element.y
                     new_width = self.element_start_width - dx
                     new_height = self.element_start_height + dy
+                    new_x, new_y, new_width, new_height = self._snap_resize_candidates(
+                        new_x, new_y, new_width, new_height, self.resize_handle)
 
                     if new_width > 20 and new_height > 20:
                         scale_x = new_width / element.width
@@ -5306,8 +5440,12 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                         element.height = new_height
 
                 elif self.resize_handle == 'bottom-right':
+                    new_x = element.x
+                    new_y = element.y
                     new_width = self.element_start_width + dx
                     new_height = self.element_start_height + dy
+                    new_x, new_y, new_width, new_height = self._snap_resize_candidates(
+                        new_x, new_y, new_width, new_height, self.resize_handle)
 
                     if new_width > 20 and new_height > 20:
                         scale_x = new_width / element.width
@@ -5326,7 +5464,7 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
                         element.height = new_height
 
                 self.canvas.queue_draw()
-    
+
     def _on_drag_end(self, gesture, offset_x, offset_y):
         """Handle drag end."""
         # Handle gridline drag end — remove if dragged off page
@@ -5375,6 +5513,16 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
             if element.type == ElementType.CUSTOM_PANEL:
                 self._update_custom_panel_bounds(element)
         
+        # Push undo command for move/resize if we have a pre-state
+        if self._undo_pre_state is not None:
+            moved_element = self.dragging_element or self.resizing_element
+            if moved_element:
+                new_state = self._snapshot_element(moved_element)
+                if new_state != self._undo_pre_state:
+                    cmd = MoveResizeCommand(moved_element, self._undo_pre_state, new_state)
+                    self.undo_manager.push_command(cmd)
+            self._undo_pre_state = None
+
         # Update properties panel after resize to reflect new values
         self._update_properties_panel()
 
@@ -5634,8 +5782,8 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         return None
 
     def _snap_to_gridlines(self, element):
-        """Snap element edges to nearby gridlines. Modifies element.x/y in place."""
-        if not self.current_page or not self.gridlines_visible:
+        """Snap element edges to nearby gridlines and page boundaries. Modifies element.x/y in place."""
+        if not self.current_page:
             return
         threshold = self.gridline_snap_threshold
 
@@ -5647,9 +5795,20 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         cx = element.x + element.width / 2
         cy = element.y + element.height / 2
 
-        # Snap to vertical gridlines (affect x position)
+        # Page boundaries to snap to
+        page_w = self.current_page.width
+        page_h = self.current_page.height
+        snap_v = [0, page_w]
+        snap_h = [0, page_h]
+
+        # Include gridlines if visible
+        if self.gridlines_visible:
+            snap_v.extend(self.project.gridlines_v)
+            snap_h.extend(self.project.gridlines_h)
+
+        # Snap to vertical lines (affect x position)
         best_dx = None
-        for gx in self.project.gridlines_v:
+        for gx in snap_v:
             for edge in [left, right, cx]:
                 d = gx - edge
                 if abs(d) <= threshold and (best_dx is None or abs(d) < abs(best_dx)):
@@ -5657,15 +5816,182 @@ class WorkspaceWindow(Gtk.ApplicationWindow):
         if best_dx is not None:
             element.x += best_dx
 
-        # Snap to horizontal gridlines (affect y position)
+        # Snap to horizontal lines (affect y position)
         best_dy = None
-        for gy in self.project.gridlines_h:
+        for gy in snap_h:
             for edge in [top, bottom, cy]:
                 d = gy - edge
                 if abs(d) <= threshold and (best_dy is None or abs(d) < abs(best_dy)):
                     best_dy = d
         if best_dy is not None:
             element.y += best_dy
+
+    def _snap_resize_candidates(self, new_x, new_y, new_width, new_height, handle):
+        """Snap candidate resize dimensions to gridlines. Returns (x, y, w, h) with snapping applied."""
+        if not self.current_page:
+            return new_x, new_y, new_width, new_height
+        threshold = self.gridline_snap_threshold
+
+        page_w = self.current_page.width
+        page_h = self.current_page.height
+        snap_v = [0, page_w]
+        snap_h = [0, page_h]
+        if self.gridlines_visible:
+            snap_v.extend(self.project.gridlines_v)
+            snap_h.extend(self.project.gridlines_h)
+
+        snap_left = handle in ('top-left', 'bottom-left')
+        snap_right = handle in ('top-right', 'bottom-right')
+        snap_top = handle in ('top-left', 'top-right')
+        snap_bottom = handle in ('bottom-left', 'bottom-right')
+
+        if snap_left:
+            best = None
+            for gx in snap_v:
+                d = gx - new_x
+                if abs(d) <= threshold and (best is None or abs(d) < abs(best)):
+                    best = d
+            if best is not None:
+                new_x += best
+                new_width -= best
+        elif snap_right:
+            right = new_x + new_width
+            best = None
+            for gx in snap_v:
+                d = gx - right
+                if abs(d) <= threshold and (best is None or abs(d) < abs(best)):
+                    best = d
+            if best is not None:
+                new_width += best
+
+        if snap_top:
+            best = None
+            for gy in snap_h:
+                d = gy - new_y
+                if abs(d) <= threshold and (best is None or abs(d) < abs(best)):
+                    best = d
+            if best is not None:
+                new_y += best
+                new_height -= best
+        elif snap_bottom:
+            bottom = new_y + new_height
+            best = None
+            for gy in snap_h:
+                d = gy - bottom
+                if abs(d) <= threshold and (best is None or abs(d) < abs(best)):
+                    best = d
+            if best is not None:
+                new_height += best
+
+        return new_x, new_y, new_width, new_height
+
+    def _get_image_snap_lines(self, element):
+        """Get snap lines for image-in-panel operations (panel edges + gridlines in panel-relative coords)."""
+        threshold = self.gridline_snap_threshold
+        # Panel edges (in panel-relative coordinates, i.e. offset space)
+        snap_v = [0, element.width]
+        snap_h = [0, element.height]
+        # Gridlines converted to panel-relative coordinates
+        if self.gridlines_visible:
+            for gx in self.project.gridlines_v:
+                snap_v.append(gx - element.x)
+            for gy in self.project.gridlines_h:
+                snap_h.append(gy - element.y)
+        return snap_v, snap_h, threshold
+
+    def _snap_image_in_panel(self, element):
+        """Snap image edges to panel edges and gridlines while moving image inside panel."""
+        snap_v, snap_h, threshold = self._get_image_snap_lines(element)
+
+        offset_x = element.properties.get("image_offset_x", 0)
+        offset_y = element.properties.get("image_offset_y", 0)
+        img_w = element.properties.get("image_width", element.width)
+        img_h = element.properties.get("image_height", element.height)
+
+        # Image edges in panel-relative space
+        left = offset_x
+        right = offset_x + img_w
+        cx = offset_x + img_w / 2
+
+        best_dx = None
+        for gx in snap_v:
+            for edge in [left, right, cx]:
+                d = gx - edge
+                if abs(d) <= threshold and (best_dx is None or abs(d) < abs(best_dx)):
+                    best_dx = d
+        if best_dx is not None:
+            element.properties["image_offset_x"] = offset_x + best_dx
+
+        top = offset_y
+        bottom = offset_y + img_h
+        cy = offset_y + img_h / 2
+
+        best_dy = None
+        for gy in snap_h:
+            for edge in [top, bottom, cy]:
+                d = gy - edge
+                if abs(d) <= threshold and (best_dy is None or abs(d) < abs(best_dy)):
+                    best_dy = d
+        if best_dy is not None:
+            element.properties["image_offset_y"] = offset_y + best_dy
+
+    def _snap_image_resize_in_panel(self, element, aspect_ratio):
+        """Snap image edges to panel edges and gridlines while resizing image inside panel."""
+        snap_v, snap_h, threshold = self._get_image_snap_lines(element)
+
+        offset_x = element.properties.get("image_offset_x", 0)
+        offset_y = element.properties.get("image_offset_y", 0)
+        img_w = self.temp_image_width
+        img_h = self.temp_image_height
+
+        # Check all four image edges for snap
+        right = offset_x + img_w
+        bottom = offset_y + img_h
+
+        best_dw = None
+        # Snap right edge
+        for gx in snap_v:
+            d = gx - right
+            if abs(d) <= threshold and (best_dw is None or abs(d) < abs(best_dw)):
+                best_dw = d
+        # Snap left edge
+        for gx in snap_v:
+            d = gx - offset_x
+            if abs(d) <= threshold and (best_dw is None or abs(d) < abs(best_dw)):
+                best_dw = -d  # shrink width
+
+        best_dh = None
+        # Snap bottom edge
+        for gy in snap_h:
+            d = gy - bottom
+            if abs(d) <= threshold and (best_dh is None or abs(d) < abs(best_dh)):
+                best_dh = d
+        # Snap top edge
+        for gy in snap_h:
+            d = gy - offset_y
+            if abs(d) <= threshold and (best_dh is None or abs(d) < abs(best_dh)):
+                best_dh = -d
+
+        # Pick the snap that requires the smallest proportional change (maintain aspect ratio)
+        if best_dw is not None and best_dh is not None:
+            if abs(best_dw) / max(img_w, 1) <= abs(best_dh) / max(img_h, 1):
+                new_w = img_w + best_dw
+                new_h = new_w / aspect_ratio
+            else:
+                new_h = img_h + best_dh
+                new_w = new_h * aspect_ratio
+        elif best_dw is not None:
+            new_w = img_w + best_dw
+            new_h = new_w / aspect_ratio
+        elif best_dh is not None:
+            new_h = img_h + best_dh
+            new_w = new_h * aspect_ratio
+        else:
+            return
+
+        if new_w > 20 and new_h > 20:
+            self.temp_image_width = new_w
+            self.temp_image_height = new_h
 
     def _update_layer_buttons(self):
         """Enable/disable layer buttons based on selection."""

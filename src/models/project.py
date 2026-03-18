@@ -110,6 +110,10 @@ class Project:
         project_dir = projects_dir / f"{name}.comicmaker"
         project = Project(name, project_dir, template["width"], template["height"])
         project.ensure_directories()
+        # Default guidelines 30px from each edge
+        margin = 30
+        project.gridlines_v = [margin, template["width"] - margin]
+        project.gridlines_h = [margin, template["height"] - margin]
         project.add_page()
         project.save()
         
